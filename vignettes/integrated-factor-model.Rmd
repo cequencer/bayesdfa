@@ -275,12 +275,16 @@ Now I need to put it all together:
 
 ```{r}
 
-chan_names = colnames(weekly_clean_data)[7:16]
+chan_names <- list()
+factor_data <- list()
+
+chan_names$small = colnames(weekly_clean_data)[7:16]
 depvar_name = "total_sales"
 config_dir = tempdir()
 
-factor_data = generate_factor_stan_data(depvar_name, chan_names, num_trends = 3, estimate_nu = T, 
-                                        zscore = T)
+factor_data$small = generate_factor_stan_data(depvar_name, chan_names$small, 
+                                              num_trends = 3, estimate_nu = T, 
+                                              zscore = T)
 
 ```
 
@@ -297,7 +301,7 @@ channel_data$scaled_in_config = generate_obs_stan_data(depvar_name, chan_names,
                                                        num_trends = 3, config_dir, 
                                                        upscale_trends = T)
 
-stan_data$scaled_in_config = c(factor_data, channel_data$scaled_in_config, 
+stan_data$scaled_in_config = c(factor_data$small, channel_data$scaled_in_config, 
                                n_holdout = 0, residualize = 0, upscale_trends = 0)
 
 ```
@@ -310,7 +314,7 @@ channel_data$scaled_in_stan = generate_obs_stan_data(depvar_name, chan_names,
                                                        num_trends = 3, config_dir, 
                                                        upscale_trends = F)
 
-stan_data$scaled_in_stan = c(factor_data, channel_data$scaled_in_stan, 
+stan_data$scaled_in_stan = c(factor_data$small, channel_data$scaled_in_stan, 
                                n_holdout = 0, residualize = 0, upscale_trends = 1)
 
 ```
@@ -387,32 +391,61 @@ abline(v = loo::pareto_k_ids(leeloo$scaled_in_config, threshold = 1), col = "dar
 ```
 
 
-Now going to try with the full complement of channels:
+Now going to try with the full complement of channels -- now testing three and five latent factors 
 
 ```{r}
 
-chan_names = colnames(weekly_clean_data)[3:24]
-depvar_name = "total_sales"
-config_dir = tempdir()
+chan_names$large = colnames(weekly_clean_data)[3:24]
 
-factor_data = generate_factor_stan_data(depvar_name, chan_names, num_trends = 5, estimate_nu = T, 
-                                        zscore = T)
+factor_data$large$three = generate_factor_stan_data(depvar_name, 
+                                              chan_names$large, num_trends = 3, estimate_nu = T, 
+                                              zscore = T)
 
-```
-
-We're going to generate two stan datas, one with trends upscaled in our data/config and one in stan
-
-First the way we have been doing it
-
-```{r}
+factor_data$large$five = generate_factor_stan_data(depvar_name, 
+                                              chan_names$large, num_trends = 5, estimate_nu = T, 
+                                              zscore = T)
 
 
-channel_data$scaled_in_config = generate_obs_stan_data(depvar_name, chan_names, 
+channel_data$large$three = generate_obs_stan_data(depvar_name, chan_names$large, 
                                                        num_trends = 3, config_dir, 
                                                        upscale_trends = T)
 
-stan_data$scaled_in_config = c(factor_data, channel_data$scaled_in_config, 
+stan_data$large$three = c(factor_data$large$three, channel_data$large$three, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+channel_data$large$five = generate_obs_stan_data(depvar_name, chan_names$large, 
+                                                       num_trends = 5, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$large$five = c(factor_data$large$five, channel_data$large$five, 
                                n_holdout = 0, residualize = 0, upscale_trends = 0)
 
 ```
 
+```{r}
+fit$large$five = vb(
+  stanmodels$dfa_pred,
+  stan_data$large$five,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$large$five = rstan::extract(fit$large$five)
+```
+
+```{r}
+fit$large$three = vb(
+  stanmodels$dfa_pred,
+  stan_data$large$three,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$large$three = rstan::extract(fit$large$three)
+```
