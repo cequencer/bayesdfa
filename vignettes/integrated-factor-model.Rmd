@@ -10,6 +10,7 @@ output: html_notebook
 ```{r}
 library(tidyverse)
 library(rstan)
+library(bayesplot)
 weekly_clean_data = read_csv("../../weekly_clean_data.csv")
 dfa_pred = stan_model("../src/stan_files/dfa-pred.stan")
 stanmodels <- list()
@@ -93,11 +94,11 @@ stanmodels$dfa_pred = dfa_pred
 #' m <- fit_dfa(y = s$y_sim, iter = 250, chains = 1, pro_covar=pro_covar)
 #'}
 
-fit_dfa_pred <- function(y = y,
-                    depvar = depvar,
+fit_dfa_pred <- function(y,
+                         depvar,
                     num_trends = 1,
                     varIndx = NULL,
-                    zscore = F,
+                    zscore = T,
                     iter = 2000,
                     chains = 4,
                     thin = 1,
@@ -272,7 +273,7 @@ fit_dfa_pred <- function(y = y,
     predictors = predictors
   )
 
-  pars <- c("x", "Z", "sigma", "log_lik", "psi") # removed pred
+  pars <- c("x", "Z", "sigma", "log_lik", "psi", "beta", "epsilon") # removed pred
   if (est_correlation) pars <- c(pars, "Omega") # add correlation matrix
   if (estimate_nu) pars <- c(pars, "nu")
   if (estimate_trend_ar) pars <- c(pars, "phi")
@@ -316,37 +317,154 @@ fit_dfa_pred <- function(y = y,
 ```
 
 ```{r}
-
-
-y = weekly_clean_data[, 7:16]
-depvar = weekly_clean_data$total_sales
-
-depvar = depvar-mean(depvar)
-
-y = t(t(y)-apply(y, 2, mean))
+a = scale(weekly_clean_data[, 7:16], center = T, scale = T)
+depvar = scale(weekly_clean_data$total_sales, center = T, scale=T)[, 1]
   
-mod = fit_dfa_pred(y = y,
+mod = fit_dfa_pred(y = a[, 1:7],
   depvar = depvar,
-  num_trends = 3,
+  num_trends = 2,
   varIndx = NULL,
-  zscore = F,
-  iter = 2000,
+  zscore = T,
+  iter = 20000,
+  warmup = 18000,
   cores = 2,
   chains = 2,
   thin = 1,
-  control = list(adapt_delta = 0.99, max_treedepth = 20),
-  nu_fixed = 3,
+  control = list(adapt_delta = 0.99, max_treedepth = 11),
+  nu_fixed = 20,
   est_correlation = FALSE,
   estimate_nu = T,
-  estimate_trend_ar = T,
-  estimate_trend_ma = T,
+  estimate_trend_ar = F,
+  estimate_trend_ma = F,
   sample = TRUE,
   data_shape = "long",
   obs_covar = NULL,
-  pro_covar = NULL
+  pro_covar = NULL,
+  verbose = T
 )
+```
+
+
+Turns out that you have to keep estimate_ma and ar terms = F
+
+
+```{r}
+post = rstan::extract(mod)
+np = nuts_params(mod)
+stan_trace(mod, "beta[4]")
+post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 1] %>% ts.plot()
+
+trends = post$x %>% apply(c(2,3), mean) %>% t
+
 
 ```
+
+```{r}
+
+head(np)
+# mcmc_pairs(mod, np = np, pars = vars(starts_with("beta")))
+mcmc_parcoord(mod, np = np, pars = vars(starts_with("beta")))
+
+```
+
+## Notes
+- Okay so it seems that the inputs need to be scaled for this to work
+- I thought I had run that model on dfa-pred, but I had not
+- Dang, okay running it now
+
+- Took foooorever. Going to run w/ 1000 iter. 
+- Okay even w/ 100 iterations, this doesn't work. Time to follow the folk theorem
+
+- The beta_k scale was wacky - pulled that down
+- Still taking forever. Need to pare this back and go piece by piece. 
+- Making beta a fixed vector
+
+- Ok this is quite ridiculous. Taking out even beta and seeing what happens.
+- Ok I hadn't commented out beta in the xformed params block so maybe that fucked things
+
+- Okay now going to take beta out. 
+
+- Ok the beta really makes it all run super slow. Damn it. 
+
+- Not sure what the best way is forward from here. Let's try another beta run..
+- Found some issues w/ what I was doing before. Hope this goes better. 
+- Damn it--still gets suck. 
+
+- Exploring a hunch that the model is unidentified with symmetry. Constraining beta > 0.
+- Didn't seem to work. Fuck.
+
+- Going to start with an init... 
+- Still no joy
+
+- GOD DAMN IT. 
+- Okay going to do some step size jittering. 
+- Okay nevermind betanalpha says not to
+
+- Okay going to run it on some very very small data.
+- Trying to follow this: https://discourse.mc-stan.org/t/large-model-runs-very-slowly/1325/4
+
+- MAX TREEDEPTH WAS 20 WTFFF
+- Okay reducing the treedepth does a lot
+- The model does not appear to be well identified
+- Need to look at the posterior draws and see which parameters are correlated
+-> beta and Z, perhaps? 
+
+- unclear, since there was so little movement in the parameters
+- believe that i need to have a bigger step size in the adaptation phase
+
+- i did -- but now I think that i need to constrain beta > 0
+
+- new strategy -- i think i should perhaps let adapt_delta be small and see where there are divergences...
+
+- new theory is that i need to qr decompose my model
+
+data {
+  int<lower=1> N;
+  int<lower=1> M;
+  matrix[M, N] X;
+  // mine is transposed
+  [N, M] X
+  vector[N] y;
+}
+
+transformed data {
+  // Compute, thin, and then scale QR decomposition
+  matrix[N, M] Q = qr_Q(X')[, 1:M] * N;
+  
+  // so i don't need to transpose my X here...
+  
+  matrix[M, M] R = qr_R(X')[1:M, ] / N;
+  matrix[M, M] R_inv = inverse(R);
+}
+
+Hmm -- that blew up gradient evaluation. That computation is way too expensive to be done inside transformed parameters
+
+Maybe i do it just on the predictors? Let's see about that.
+
+This did bring back down the gradient time, but why should this work in theory? The first factor is just likely to be a problem in any case
+
+Okay early indications are positive here! Ran it with treedepth = 5 and adapt_delta = .9
+Lots of divergences but I think that this is due to the stepsize being a bit larger
+Can always bring the adapt_delta up
+
+Okay bringing adapt delta essentially removed the issues but how TF would I do adstock xformation on a QR decomposed matrix... something for another time...
+
+One additional thought of the night -- doing the QR decomposition on the matrix is pretty key and maybe worth the extra time in gradient evaluation
+
+Also -- we don't need to esimate the effectiveness of the channels over the whole time period
+Could take averages or something like that...
+
+
+## Next steps
+
+- This *is scaled* 
+- Also *this doesn't include adstocking!* 
+
+
+
+
+
+
 
 
 

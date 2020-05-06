@@ -38,6 +38,7 @@ transformed data {
   int n_pcor; // dimension for cov matrix
   int n_loglik; // dimension for loglik calculation
   vector[K] zeros;
+  matrix[N, P] predictors_qr = qr_Q(predictors)[, 1:P] * N;
 
   for(k in 1:K) {
     zeros[k] = 0; // used in MVT / MVN below
@@ -72,10 +73,11 @@ parameters {
   real<lower=-1,upper=1> phi[est_phi*K];
   real<lower=-1,upper=1> theta[est_theta*K];
   cholesky_factor_corr[n_pcor] Lcorr;
-  matrix[N, P] beta_steps;
-  vector[K] beta_k;
-  vector<lower=0>[P] mu;
+  // matrix[N, P] beta_steps;
+  // vector[K] beta_k;
+  // vector<lower=0>[P] mu;
   real<lower=0> epsilon;
+  vector[P+K] beta;
 }
 transformed parameters {
   matrix[P,N] pred; //vector[P] pred[N];
@@ -88,16 +90,16 @@ transformed parameters {
   matrix[K,N] x; //vector[N] x[P]; // random walk-trends
   vector[K] indicator; // indicates whether diagonal is neg or pos
   vector[K] psi_root; // derived sqrt(expansion parameter psi)
-  matrix[N, P+K] beta;
+  // matrix[N, P+K] beta;
   matrix[N, P+K] obs_des_mtx;
   vector[N] depvar_predictions;
 
-  for(p in 1:P) {
-    beta[, p] = cumulative_sum(beta_steps[, p]);
-  }
-  for(k in 1:K) {
-    beta[, P+k] = rep_vector(beta_k[k], N);
-  }
+  // for(p in 1:P) {
+  //   beta[, p] = cumulative_sum(beta_steps[, p]);
+  // }
+  // for(k in 1:K) {
+  //   beta[, P+k] = rep_vector(beta_k[k], N);
+  // }
 
   // phi is the ar(1) parameter, fixed or estimated
   if(est_phi == 1) {
@@ -198,15 +200,18 @@ transformed parameters {
   // matrix[N, P+K] beta;
   // matrix[N, P+K] obs_des_mtx;
 
-  obs_des_mtx = append_col(predictors, x');
-  for(t in 1:N) depvar_predictions[t] = dot_product(obs_des_mtx[t, ], beta[t, ]);
+  obs_des_mtx = append_col(predictors_qr, x');
+  depvar_predictions = obs_des_mtx * beta;
 
 }
 model {
 
-  for(i in 1:P) beta_steps[, i] ~ normal(0, mu[i]);
-  beta_k ~ normal(0, 100);
-  mu ~ normal(0, .1);
+  // beta_steps[1, ] ~ normal(0, 1);
+  // for(i in 1:P) beta_steps[2:N, i] ~ normal(0, mu[i]);
+  // beta_k ~ normal(0, 1);
+  // mu ~ normal(0, .1);
+  epsilon ~ normal(0, 1);
+  beta ~ normal(0, 1);
   depvar ~ normal(depvar_predictions, epsilon);
 
   // initial state for each trend
