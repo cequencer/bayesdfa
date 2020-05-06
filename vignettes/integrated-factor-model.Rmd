@@ -19,6 +19,23 @@ stanmodels <- list()
 stanmodels$dfa_pred = dfa_pred
 ```
 
+Because I didn't write my helper functions well below I need to store whatever the current dataset is in a global -- `current_data` -- which we'll overwrite. Not good practice but will suffice for testing. 
+
+```{r}
+data_list <- list()
+data_list$full <- weekly_clean_data
+
+# between four weeks of relatively calm period
+data_list$t170 <- weekly_clean_data[1:170, ]
+data_list$t174 <- weekly_clean_data[1:174, ]
+
+# one week before the end of the data
+data_list$t207 <- weekly_clean_data[1:207, ]
+
+# resetting the global
+current_data <- data_list$full
+```
+
 
 The first thing I need to do is to generate all the parameters for the factor part of the model:
 
@@ -205,8 +222,8 @@ The first thing I need to do is to generate all the parameters for the factor pa
 
 generate_factor_stan_data <- function(depvar_name, chan_names, ...) {
   
-  depvar = select(weekly_clean_data, !!depvar_name)
-  y      = as.data.frame(weekly_clean_data[, chan_names])
+  depvar = select(current_data, !!depvar_name)
+  y      = as.data.frame(current_data[, chan_names])
   
   
   .generate_factor_stan_data(y, depvar, ...)
@@ -220,7 +237,7 @@ The second thing I need to do is to generate all the parameters for the custom f
 
 generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_dir, upscale_trends = F) {
 
-  y_actual = weekly_clean_data[, depvar_name][[1]]
+  y_actual = current_data[, depvar_name][[1]]
   
   if(file.exists(file.path(tempdir(), "test_sim.yaml"))) {
     file.remove(file.path(tempdir(), "test_sim.yaml"))
@@ -278,7 +295,7 @@ Now I need to put it all together:
 chan_names <- list()
 factor_data <- list()
 
-chan_names$small = colnames(weekly_clean_data)[7:16]
+chan_names$small = colnames(current_data)[7:16]
 depvar_name = "total_sales"
 config_dir = tempdir()
 
@@ -387,7 +404,7 @@ plot_comp_between_channels =
 
 
 ```{r}
-# ts.plot(weekly_clean_data$total_sales)
+# ts.plot(current_data$total_sales)
 # abline(v = loo::pareto_k_ids(leeloo$scaled_in_config, threshold = 1), col = "darkred")
 ```
 
@@ -396,7 +413,7 @@ Now going to try with the full complement of channels -- now testing three and f
 
 ```{r}
 
-chan_names$large = colnames(weekly_clean_data)[3:24]
+chan_names$large = colnames(current_data)[3:24]
 
 factor_data$large$three = generate_factor_stan_data(depvar_name, 
                                               chan_names$large, num_trends = 3, estimate_nu = T, 
@@ -465,12 +482,46 @@ loo::loo_model_weights(leeloo$large)
 ```
 
 ```{r}
-ts.plot(weekly_clean_data$total_sales)
+ts.plot(current_data$total_sales)
 abline(v = loo::pareto_k_ids(leeloo$large$three, threshold = .7), col = "darkred")
 abline(v = loo::pareto_k_ids(leeloo$large$five, threshold = .7), col = "darkblue")
 ```
 
 ```{r}
 plot_comp_between_channels(10, post$large, c(5, 3))
+```
+
+
+Let's run the model up to various stopping points
+
+```{r}
+current_data <- data_list$t207
+chan_names$stopping = colnames(current_data)[3:24]
+
+factor_data$stopping$t207 = generate_factor_stan_data(depvar_name, 
+                                              chan_names$stopping, num_trends = 3, 
+                                              estimate_nu = T, 
+                                              zscore = T)
+
+channel_data$stopping$t207 = generate_obs_stan_data(depvar_name, chan_names$stopping, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$stopping$t207 = c(factor_data$stopping$t207, channel_data$stopping$t207, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+```
+
+```{r}
+fit$stopping$t207 = vb(
+  stanmodels$dfa_pred,
+  stan_data$stopping$t207,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$stopping$t207 = rstan::extract(fit$stopping$t207)
 ```
 
