@@ -38,7 +38,6 @@ transformed data {
   int n_pcor; // dimension for cov matrix
   int n_loglik; // dimension for loglik calculation
   vector[K] zeros;
-  matrix[N, P] predictors_qr = qr_Q(predictors)[, 1:P] * N;
 
   for(k in 1:K) {
     zeros[k] = 0; // used in MVT / MVN below
@@ -92,6 +91,7 @@ transformed parameters {
   vector[K] psi_root; // derived sqrt(expansion parameter psi)
   // matrix[N, P+K] beta;
   matrix[N, P+K] obs_des_mtx;
+  matrix[N, P+K] obs_des_mtx_qr;
   vector[N] depvar_predictions;
 
   // for(p in 1:P) {
@@ -200,8 +200,9 @@ transformed parameters {
   // matrix[N, P+K] beta;
   // matrix[N, P+K] obs_des_mtx;
 
-  obs_des_mtx = append_col(predictors_qr, x');
-  depvar_predictions = obs_des_mtx * beta;
+  obs_des_mtx = append_col(predictors, x');
+  obs_des_mtx_qr = qr_Q(obs_des_mtx)[, 1:(P+K)] * N;
+  depvar_predictions = obs_des_mtx_qr * beta;
 
 }
 model {

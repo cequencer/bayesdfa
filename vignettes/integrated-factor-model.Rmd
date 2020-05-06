@@ -319,18 +319,19 @@ fit_dfa_pred <- function(y,
 ```{r}
 a = scale(weekly_clean_data[, 7:16], center = T, scale = T)
 depvar = scale(weekly_clean_data$total_sales, center = T, scale=T)[, 1]
-  
-mod = fit_dfa_pred(y = a[, 1:7],
+
+a = weekly_clean_data %>% select(1:7, total_sales) %>% scale
+
+mod = fit_dfa_pred(y = a,
   depvar = depvar,
   num_trends = 2,
   varIndx = NULL,
   zscore = T,
-  iter = 20000,
-  warmup = 18000,
+  iter = 1000,
   cores = 2,
   chains = 2,
   thin = 1,
-  control = list(adapt_delta = 0.99, max_treedepth = 11),
+  control = list(adapt_delta = 0.9, max_treedepth = 5),
   nu_fixed = 20,
   est_correlation = FALSE,
   estimate_nu = T,
@@ -351,21 +352,16 @@ Turns out that you have to keep estimate_ma and ar terms = F
 ```{r}
 post = rstan::extract(mod)
 np = nuts_params(mod)
-stan_trace(mod, "beta[4]")
-post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 1] %>% ts.plot()
-
 trends = post$x %>% apply(c(2,3), mean) %>% t
 
+stan_trace(mod, "beta[6]")
+post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 2] %>% ts.plot()
 
 ```
-
 ```{r}
-
-head(np)
-# mcmc_pairs(mod, np = np, pars = vars(starts_with("beta")))
 mcmc_parcoord(mod, np = np, pars = vars(starts_with("beta")))
-
 ```
+
 
 ## Notes
 - Okay so it seems that the inputs need to be scaled for this to work
@@ -453,6 +449,16 @@ One additional thought of the night -- doing the QR decomposition on the matrix 
 
 Also -- we don't need to esimate the effectiveness of the channels over the whole time period
 Could take averages or something like that...
+
+Jesus all of this just suxxx
+Going to do the QR thing on our predictors again and blow up gradient computation time
+
+Here is a good resource on multimodality:
+https://discourse.mc-stan.org/t/help-with-qr-decomposition-with-latent-variable/14838/9
+
+Okay wow the QR trick worked...
+
+Going to back out what the betas actually are 
 
 
 ## Next steps
