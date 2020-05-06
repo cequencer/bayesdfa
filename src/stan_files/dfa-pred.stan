@@ -444,6 +444,7 @@ data {
   real measurement_exo_ub;
 
   int residualize;
+  int upscale_trends;
 }
 transformed data {
 
@@ -538,6 +539,7 @@ transformed parameters {
   matrix[N, 1] y_pred;
   matrix[N, P] rescaled_demeaned_preds;
   matrix[N, P+K] concat_predictors;
+  matrix[N, K] scaled_trends;
   vector[N] log_lik;
 
 
@@ -656,10 +658,20 @@ transformed parameters {
   for(i in 1:P) {
     rescaled_demeaned_preds[, i] = predictor_means[i] + pred[i, ]' * predictor_scales[i];
   }
-  if(residualize == 1) {
-    concat_predictors = append_col(x', predictors - rescaled_demeaned_preds);
+
+  if(upscale_trends == 1) {
+    real overall_mean  = mean(predictor_means);
+    real overall_scale = mean(predictor_scales);
+    scaled_trends = overall_mean + x' * overall_scale;
   } else {
-    concat_predictors = append_col(x', predictors);
+    // do nothing
+    scaled_trends = x';
+  }
+
+  if(residualize == 1) {
+    concat_predictors = append_col(scaled_trends, predictors - rescaled_demeaned_preds);
+  } else {
+    concat_predictors = append_col(scaled_trends, predictors);
   }
 
 

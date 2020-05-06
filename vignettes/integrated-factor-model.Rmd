@@ -12,6 +12,7 @@ library(tidyverse)
 library(rstan)
 library(bayesplot)
 library(recast)
+library(loo)
 weekly_clean_data = read_csv("../../weekly_clean_data.csv")
 dfa_pred = stan_model("../src/stan_files/dfa-pred.stan")
 stanmodels <- list()
@@ -217,7 +218,7 @@ The second thing I need to do is to generate all the parameters for the custom f
 
 ```{r}
 
-generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_dir) {
+generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_dir, upscale_trends = F) {
 
   y_actual = weekly_clean_data[, depvar_name][[1]]
   
@@ -235,14 +236,16 @@ generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_d
   orig_config = yaml::read_yaml(file.path(config_dir, "test_sim.yaml"))
 
   trend_template = orig_config[1]
-
-  trend_template[[1]]$ub = Inf
-  trend_template[[1]]$lb = -Inf
-  trend_template[[1]]$q80 = sd(y_actual)/10
-  trend_template[[1]]$q20 = -sd(y_actual)/10
   trend_template[[1]]$mu = 0.0001
   trend_template[[1]]$adstock = 0
-
+  
+  if(upscale_trends) {
+    trend_template[[1]]$ub = Inf
+    trend_template[[1]]$lb = -Inf
+    trend_template[[1]]$q80 = sd(y_actual)/10
+    trend_template[[1]]$q20 = -sd(y_actual)/10  
+  }
+  
   new_config = orig_config
   for(i in num_trends:1) {
     trend_component = trend_template
@@ -279,19 +282,50 @@ config_dir = tempdir()
 factor_data = generate_factor_stan_data(depvar_name, chan_names, num_trends = 3, estimate_nu = T, 
                                         zscore = T)
 
-channel_data = generate_obs_stan_data(depvar_name, chan_names, num_trends = 3, config_dir)
-
-stan_data = c(factor_data, channel_data, n_holdout = 0, residualize = 0)
-
 ```
 
-And finally, to start sampling -- with no residualization:
+We're going to generate two stan datas, one with trends upscaled in our data/config and one in stan
+
+First the way we have been doing it
 
 ```{r}
 
-fit_nores = vb(
+channel_data <- list()
+stan_data <- list()
+
+channel_data$scaled_in_config = generate_obs_stan_data(depvar_name, chan_names, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$scaled_in_config = c(factor_data, channel_data$scaled_in_config, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+```
+
+And second doing it in stan
+
+```{r}
+
+channel_data$scaled_in_stan = generate_obs_stan_data(depvar_name, chan_names, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = F)
+
+stan_data$scaled_in_stan = c(factor_data, channel_data$scaled_in_stan, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 1)
+
+```
+
+
+And finally, to start sampling -- first the existing way:
+
+```{r}
+
+fit <- list()
+post <- list()
+
+fit$scaled_in_config = vb(
   stanmodels$dfa_pred,
-  stan_data,
+  stan_data$scaled_in_config,
   # iter = 100,
   # chains = 2,
   # cores = 2,
@@ -299,19 +333,16 @@ fit_nores = vb(
   pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
 )
 
-post_nores = rstan::extract(fit_nores)
+post$scaled_in_config = rstan::extract(fit$scaled_in_config)
 
 ```
 
 And with residualization:
 
 ```{r}
-
-stan_data$residualize = 1
-
-fit_res = vb(
+fit$scaled_in_stan = vb(
   stanmodels$dfa_pred,
-  stan_data,
+  stan_data$scaled_in_stan,
   # iter = 100,
   # chains = 2,
   # cores = 2,
@@ -319,30 +350,69 @@ fit_res = vb(
   pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
 )
 
-post_res = rstan::extract(fit_res)
+post$scaled_in_stan = rstan::extract(fit$scaled_in_stan)
 ```
 
 
 ```{r}
-library(loo)
-log_lik_res <- extract_log_lik(fit_res, merge_chains = FALSE)
-r_eff_res <- relative_eff(exp(log_lik_res))
-leeloo_res <- loo(log_lik_res, r_eff = r_eff_res, cores = 2)
+log_lik <- list()
+r_eff   <- list()
+leeloo  <- list()
 
-log_lik_nores <- extract_log_lik(fit_nores, merge_chains = FALSE)
-r_eff_nores <- relative_eff(exp(log_lik_nores))
-leeloo_nores <- loo(log_lik_nores, r_eff = r_eff_nores, cores = 2)
+log_lik$scaled_in_config <- extract_log_lik(fit$scaled_in_config, merge_chains = FALSE)
+r_eff$scaled_in_config <- relative_eff(exp(log_lik$scaled_in_config ))
+leeloo$scaled_in_config <- loo(log_lik$scaled_in_config, r_eff = r_eff$scaled_in_config, cores = 2)
 
-loo_compare(leeloo_res, leeloo_nores)
+log_lik$scaled_in_stan <- extract_log_lik(fit$scaled_in_stan, merge_chains = FALSE)
+r_eff$scaled_in_stan <- relative_eff(exp(log_lik$scaled_in_stan))
+leeloo$scaled_in_stan <- loo(log_lik$scaled_in_stan, r_eff = r_eff$scaled_in_stan, cores = 2)
 
-loo::loo_model_weights(list(leeloo_res, leeloo_nores))
 ```
+
+```{r}
+plot_comp_between_channels = 
+  function(idx) {
+    map(post, ~ .x$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, idx]) %>% 
+    reduce(cbind) %>% 
+    ts.plot(col = c("darkred", "darkblue"))
+    
+    legend("topright", names(post), col = c("darkred", "darkblue"), lty = 1)
+  }
+```
+
 
 ```{r}
 ts.plot(weekly_clean_data$total_sales)
-abline(v = loo::pareto_k_ids(leeloo_nores, threshold = 1), col = "darkred")
+abline(v = loo::pareto_k_ids(leeloo$scaled_in_config, threshold = 1), col = "darkred")
 ```
 
 
+Now going to try with the full complement of channels:
 
+```{r}
+
+chan_names = colnames(weekly_clean_data)[3:24]
+depvar_name = "total_sales"
+config_dir = tempdir()
+
+factor_data = generate_factor_stan_data(depvar_name, chan_names, num_trends = 5, estimate_nu = T, 
+                                        zscore = T)
+
+```
+
+We're going to generate two stan datas, one with trends upscaled in our data/config and one in stan
+
+First the way we have been doing it
+
+```{r}
+
+
+channel_data$scaled_in_config = generate_obs_stan_data(depvar_name, chan_names, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$scaled_in_config = c(factor_data, channel_data$scaled_in_config, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+```
 
