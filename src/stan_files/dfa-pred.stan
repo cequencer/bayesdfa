@@ -1,3 +1,391 @@
+functions {
+
+  vector constrain_a(vector a_unconstrained, vector bound_type, vector lb, vector ub) {
+
+  /*
+
+  bound_type:
+    0 = no bounds
+    1 = lower bound
+    2 = upper bound
+    3 = both upper and lower
+
+  */
+
+
+  int L = num_elements(a_unconstrained);
+  vector[L] a_constrained;
+
+  for(i in 1:L) {
+
+    if(bound_type[i] == 0) {
+      a_constrained[i] = a_unconstrained[i];
+    } else if(bound_type[i] == 1) {
+      a_constrained[i] = fmax(lb[i], a_unconstrained[i]);
+    } else if(bound_type[i] == 2) {
+      a_constrained[i] = fmin(ub[i],  a_unconstrained[i]);
+    } else {
+      a_constrained[i] = fmin(ub[i], fmax(lb[i], a_unconstrained[i]));
+    }
+
+  }
+
+  return(a_constrained);
+  }
+
+  matrix conditional_dist_joint_normal(vector mean_state, vector mean_obs, vector obs, matrix var_state, matrix var_obs, matrix covar_state_obs) {
+
+    int m = dims(mean_state)[1];
+    matrix[m, m+1] ret;
+    vector[m] mn;
+    matrix[m, m] v;
+
+    mn = mean_state + covar_state_obs * inverse(var_obs) * (obs - mean_obs);
+    v = var_state - covar_state_obs * inverse(var_obs) * covar_state_obs';
+
+    ret[,1] = mn;
+    ret[,2:m+1] = v;
+
+    return(ret);
+  }
+
+  matrix update_state(
+    vector y,
+    vector x,
+    matrix Px,
+    matrix Zt_vec,
+    matrix H
+  ) {
+
+    int p = dims(y)[1];
+    int m = dims(x)[1];
+    vector[p] mean_obs;
+    matrix[m, p] covar_state_obs;
+    matrix[p, p] var_obs;
+    matrix[m, m+1] update;
+
+    mean_obs = Zt_vec * x;
+    covar_state_obs = Px * Zt_vec';
+    var_obs = Zt_vec * Px * Zt_vec' + H;
+
+    update = conditional_dist_joint_normal(
+      x,
+      mean_obs,
+      y,
+      Px,
+      var_obs,
+      covar_state_obs
+    );
+
+    return(update);
+
+  }
+
+  matrix update_x(vector y,
+    vector x,
+    vector A,
+    matrix Px,
+    matrix PA,
+    matrix Zt_vec,
+    matrix lambda_vec,
+    matrix H
+  ) {
+
+    int p = dims(y)[1];
+    int m = dims(x)[1];
+    vector[p] mean_obs;
+    matrix[m, p] covar_state_obs;
+    matrix[p, p] var_obs;
+    matrix[m, m+1] update;
+
+    mean_obs = lambda_vec * A + Zt_vec * x;
+    covar_state_obs = Px * Zt_vec';
+    var_obs = lambda_vec * PA * lambda_vec' + Zt_vec * Px * Zt_vec' + H;
+
+    update = conditional_dist_joint_normal(
+      x,
+      mean_obs,
+      y,
+      Px,
+      var_obs,
+      covar_state_obs
+    );
+
+    return(update);
+
+  }
+
+  matrix update_A(
+    vector y,
+    vector x,
+    vector A,
+    matrix Px,
+    matrix PA,
+    matrix Zt_vec,
+    matrix lambda_vec,
+    matrix H) {
+
+    int p = num_elements(y);
+    int m = num_elements(x);
+    vector[p] mean_obs;
+    matrix[m, p] covar_state_obs;
+    matrix[p, p] var_obs;
+    matrix[m, m+1] update;
+
+    mean_obs = lambda_vec * A + Zt_vec * x;
+    covar_state_obs = PA* lambda_vec';
+    var_obs = lambda_vec * PA * lambda_vec' + Zt_vec * Px * Zt_vec' + H;
+
+    update = conditional_dist_joint_normal(
+      A,
+      mean_obs,
+      y,
+      PA,
+      var_obs,
+      covar_state_obs
+    );
+
+    return(update);
+
+  }
+
+  matrix ssm(
+    matrix Q, // m x m
+    matrix H, // scalar
+    matrix Z, // n x m
+    matrix T, // transition matrix // given
+    matrix y,
+    int n_in_sample) {
+
+      int n = dims(y)[1];
+      int p = dims(y)[2];
+      int m = dims(Z)[2];
+      int n_cols_return = 2 + p + 2*m;
+      int n_rows_return = n + m;
+      matrix[n_rows_return, n_cols_return] ret = rep_matrix(0, n_rows_return, n_cols_return); // this is the big matrix we'll return
+      matrix[n, m] states = rep_matrix(0, n, m);
+      matrix[n, m] adstocks = rep_matrix(0, n, m);
+      matrix[n, p] predictions = rep_matrix(0, n, p);
+      matrix[n, 1] loglik = rep_matrix(0, n, 1);
+      vector[m] x;
+      matrix[m, m] Px;
+      row_vector [m] Zt;
+      vector[p] mean_obs;
+      matrix[p, p] var_obs;
+      matrix[m, m+1] upd_x;
+      matrix[n, p] var_obs_v = rep_matrix(0, n, p);
+      vector[m] x1     = rep_vector(0, m);
+      matrix[m, m] Px1 = rep_matrix(0, m, m);
+      real reference_point = y[1,1] / Z[1,1];
+
+      if(reference_point <= 0) {
+        reference_point = mean(y[, 1] ./ Z[, 1]);
+      }
+
+      if(reference_point <= 0) {
+        reference_point = y[1,1] / 5;
+      }
+
+
+      x1[1] = reference_point / 10;
+      x1[2] = y[1,1];
+      x1[3] = 0;
+      x1[4:m] = rep_vector(0, m-3);
+      Px1[1,1] = reference_point / 5;
+      Px1[2,2] = y[1,1]/4;
+      Px1[3,3] = y[1,1]/10;
+      for(i in 4:m) Px1[i,i] = y[1,1]/4;
+
+      x = x1;
+      Px = Px1;
+
+
+      for(t in 1:n) {
+
+        Zt = Z[t, ];
+
+        if(t > 1) {
+
+          // have to ensure that we don't update x before applying the adstock rates
+          x = T * x;
+          Px = T * Px * T' + Q;
+
+        }
+
+        predictions[t, 1] = max([Zt * x, 0]);
+
+
+
+        if(t <= n_in_sample) {
+          // likelihood
+
+          mean_obs[1] = Zt * x;
+          var_obs = Zt * Px * Zt' + H;
+          loglik[t, 1] = normal_lpdf(y[t, 1] | mean_obs[1], sqrt(var_obs[1, 1]));
+          var_obs_v[t, 1] = var_obs[1,1];
+
+
+          upd_x  = update_state(to_vector(y[t,]), x, Px, to_matrix(Zt), H);
+
+          x  = upd_x[, 1];
+          Px = upd_x[, 2:m+1];
+        }
+
+
+        // record states
+        states[t, ] = x';
+
+
+      }
+
+    ret[1:n, 1:1]  = loglik;
+    ret[1:n, 2:(p+1)] = predictions;
+    ret[1:n, (p+2):(m+p+1)] = states;
+    ret[(n+1):(n+m), (p+2):(m+p+1)] = Px;
+    ret[1:n, (2*m+p+2):(2*m+p+2)] = var_obs_v;
+    return(ret);
+  }
+
+
+
+  matrix custom_adstock_filter_states(
+    vector x1, // column vector
+    matrix Px1, // m x m
+    vector A1, // column vector
+    matrix PA1, // m x m
+    matrix Q, // m x m
+    matrix R, // m x m
+    matrix H, // scalar -- going to set this equal to 0
+    matrix Z, // n x m
+    matrix T, // transition matrix // given
+    matrix lambda_vec, // 1 x m
+    matrix y,
+    vector bound_type,
+    vector lb,
+    vector ub,
+    int n_in_sample) {
+
+      int n = dims(y)[1];
+      int p = dims(y)[2];
+      int m = dims(Z)[2];
+      int n_cols_return = 2 + p + 3*m;
+      int n_rows_return = n + m;
+      matrix[n_rows_return, n_cols_return] ret = rep_matrix(0, n_rows_return, n_cols_return); // this is the big matrix we'll return
+      matrix[n, m] states = rep_matrix(0, n, m);
+      matrix[n, m] adstocks = rep_matrix(0, n, m);
+      matrix[n, p] predictions = rep_matrix(0, n, p);
+      matrix[n, 1] loglik = rep_matrix(0, n, 1);
+      vector[m] x;
+      vector[m] A;
+      matrix[n, m] Px_diag;
+      matrix[m, m] Px;
+      matrix[m, m] PA;
+      matrix[m, m] lambda_m = diag_matrix(to_vector(lambda_vec));
+      row_vector [m] Zt;
+      row_vector [m] Ztprev;
+      matrix[m, m] Zt_m;
+      matrix[m, m] Ztprev_m;
+      vector[p] mean_obs;
+      matrix[p, p] var_obs;
+      matrix[m, m+1] upd_x;
+      matrix[m, m+1] upd_A;
+      matrix[n, p] var_obs_v = rep_matrix(0, n, p);
+      matrix[n, m] cumulative_spend = rep_matrix(0, n, m);
+      matrix[m, m] Q_adj = Q;
+
+      x = x1;
+      Px = Px1;
+      A = A1;
+      PA = PA1;
+
+      for(chan in 1:m) {
+        for(t in 1:n) {
+          cumulative_spend[t, chan] = sum(Z[1:t, chan]);
+        }
+      }
+
+
+      for(t in 1:n) {
+
+        Zt = Z[t, ];
+
+        if(t > 1) {
+
+          Ztprev = Z[t-1, ];
+
+          Zt_m = diag_matrix(to_vector(Zt));
+          Ztprev_m = diag_matrix(to_vector(Ztprev));
+
+          // have to ensure that we don't update x before applying the adstock rates
+          A = lambda_m * A + Ztprev_m * x;
+          // x = T * x;
+          x = x;
+
+
+
+          // have to update PA before Px before
+          // PA depends on Px{t-1}
+          PA = lambda_m * PA * lambda_m' + Ztprev_m * Px * Ztprev_m' + R;
+
+          // adjust Q s.t. if a channel hasn't started yet, we don't add uncertainty
+          Q_adj = Q; // reset to eliminate previous period's adjustments
+          for(chan in 1:m) {
+            if(cumulative_spend[t, chan] == 0) {
+              Q_adj[chan, chan] = 0;
+            }
+          }
+
+          // Px = T * Px * T' + Q_adj;
+          Px = Px + Q_adj;
+
+        }
+
+        predictions[t, ] = to_row_vector(lambda_vec * A + Zt * x);
+
+
+
+        if(t <= n_in_sample) {
+          // likelihood
+
+          mean_obs = lambda_vec * A + Zt * x;
+          var_obs = lambda_vec * PA * lambda_vec' + Zt * Px * Zt' + H;
+          loglik[t, 1] = normal_lpdf(y[t, 1] | mean_obs[1], sqrt(var_obs[1, 1]));
+          var_obs_v[t, 1] = var_obs[1,1];
+
+
+          upd_x  = update_x(to_vector(y[t,]), x, A, Px, PA, to_matrix(Zt), lambda_vec, H);
+          x  = upd_x[, 1];
+          Px = upd_x[, 2:m+1];
+          upd_A  = update_A(to_vector(y[t, ]), x, A, Px, PA, to_matrix(Zt), lambda_vec, H);
+          A  = upd_A[, 1];
+          PA = upd_A[, 2:m+1];
+
+          x  = constrain_a(x, bound_type, lb, ub);
+        }
+
+
+        // record states
+        states[t, ] = x';
+        adstocks[t, ] = A';
+        Px_diag[t, ] = diagonal(Px)';
+
+      }
+
+    ret[1:n, 1:1]  = loglik;
+    ret[1:n, 2:(p+1)] = predictions;
+    ret[1:n, (p+2):(m+p+1)] = states;
+    ret[1:n, (m+p+2):(2*m+p+1)] = adstocks;
+    ret[(n+1):(n+m), (p+2):(m+p+1)] = Px;
+    ret[(n+1):(n+m), (m+p+2):(2*m+p+1)] = PA;
+    ret[1:n, (2*m+p+2):(2*m+p+2)] = var_obs_v;
+    ret[1:n, (2*m+p+3):(2*m+p+2+m)] = Px_diag;
+
+
+
+    return(ret);
+  }
+}
+
 data {
   int<lower=0> N; // number of data points
   int<lower=0> P; // number of time series of data
@@ -31,13 +419,54 @@ data {
   int<lower=0> n_pro_covar; // number of unique process covariates included
   int pro_covar_index[num_pro_covar,3] ;// indexed by time, trend, covariate #, covariate value. +1 because of indexing issues
   real pro_covar_value[num_pro_covar];
-  vector[N] depvar;
+
+  // ssm part
+  matrix[N, 1] depvar;
   matrix[N, P] predictors;
+  int n_holdout;
+
+  // channel expectations
+  vector[P] x1_exo;
+  vector[P] Px1_vector;
+  vector[P] sigma_channels_ub;
+  //// state constraints
+  vector[P] state_bound_type;
+  vector[P] state_lb;
+  vector[P] state_ub;
+  //// adstock constraints
+  int<lower=0, upper=1>  rate_index[P];
+  vector[P] rate_lb;
+  vector[P] rate_ub;
+
+  // constraints
+  //// parameter constraints;
+  real sigma_adstock_ub;
+
+  real measurement_exo_ub;
 }
 transformed data {
   int n_pcor; // dimension for cov matrix
   int n_loglik; // dimension for loglik calculation
   vector[K] zeros;
+  int smooth = 1;
+  int n_cols_return_exo    = 2 + 1 + 3*P;
+  int n_rows_return_exo    =N + P;
+  int n_in_sample          =N - n_holdout;
+  int n_adstocked_channels = sum(rate_index);
+  matrix[P, P] Tr_exo  = diag_matrix(rep_vector(1, P));
+  matrix[P, P] Px1_exo = diag_matrix(Px1_vector);
+  vector[P] A1                  = rep_vector(0, P);
+  matrix[P, P] PA1     = rep_matrix(0, P, P);
+
+  for(i in 1:P) {
+    if(rate_index[i] == 1) {
+      A1[i]     = 0; // Z_exo[1, i] / 10;
+      PA1[i, i] =predictors[1, i] / 10;
+    } else {
+      A1[i]     = 0;
+      PA1[i, i] = 0;
+    }
+  }
 
   for(k in 1:K) {
     zeros[k] = 0; // used in MVT / MVN below
@@ -72,11 +501,11 @@ parameters {
   real<lower=-1,upper=1> phi[est_phi*K];
   real<lower=-1,upper=1> theta[est_theta*K];
   cholesky_factor_corr[n_pcor] Lcorr;
-  // matrix[N, P] beta_steps;
-  // vector[K] beta_k;
-  // vector<lower=0>[P] mu;
-  real<lower=0> epsilon;
-  vector[P+K] beta;
+  // our part
+  vector<lower=0, upper=1>[n_adstocked_channels] rates_raw;
+  real<lower=0, upper=measurement_exo_ub> measurement_exo;
+  vector<lower=0, upper=1>[P] sigma_channels;
+  vector<lower=0, upper=sigma_adstock_ub>[n_adstocked_channels]    sigma_adstock;
 }
 transformed parameters {
   matrix[P,N] pred; //vector[P] pred[N];
@@ -89,17 +518,14 @@ transformed parameters {
   matrix[K,N] x; //vector[N] x[P]; // random walk-trends
   vector[K] indicator; // indicates whether diagonal is neg or pos
   vector[K] psi_root; // derived sqrt(expansion parameter psi)
-  // matrix[N, P+K] beta;
-  matrix[N, P+K] obs_des_mtx;
-  matrix[N, P+K] obs_des_mtx_qr;
-  vector[N] depvar_predictions;
+  matrix[n_rows_return_exo,  n_cols_return_exo]  ssm_results_exo;
+  vector[P] rates;
+  matrix[1, 1] H_exo = rep_matrix(1, 1, 1);
+  matrix[P, P] Q_exo  = rep_matrix(1, P, P);
+  matrix[P, P] R_exo  = rep_matrix(0, P, P);
+  matrix[N, P] y_pred;
 
-  // for(p in 1:P) {
-  //   beta[, p] = cumulative_sum(beta_steps[, p]);
-  // }
-  // for(k in 1:K) {
-  //   beta[, P+k] = rep_vector(beta_k[k], N);
-  // }
+
 
   // phi is the ar(1) parameter, fixed or estimated
   if(est_phi == 1) {
@@ -195,25 +621,42 @@ transformed parameters {
     }
   }
 
-  // matrix[K, N] x; //vector[N] x[P]; // random walk-trends
-  // matrix[N, P} predictors;
-  // matrix[N, P+K] beta;
-  // matrix[N, P+K] obs_des_mtx;
+  H_exo  = diag_matrix([measurement_exo]');
+  Q_exo  = diag_matrix(sigma_channels .* sigma_channels_ub);
 
-  obs_des_mtx = append_col(predictors, x');
-  obs_des_mtx_qr = qr_Q(obs_des_mtx)[, 1:(P+K)] * N;
-  depvar_predictions = obs_des_mtx_qr * beta;
+  { // spreading the raw rates to the rates vector
+    int counter = 1;
+    for(i in 1:P) {
+      if(rate_index[i] == 1) {
+        rates[i]   = rates_raw[counter] * (rate_ub[i] - rate_lb[i]) + rate_lb[i];
+        R_exo[i,i] = sigma_adstock[counter];
+        counter += 1;
+      } else {
+        rates[i] = 0;
+        R_exo[i,i] = 0;
+      }
+    }
+  }
 
+  ssm_results_exo = custom_adstock_filter_states(
+    x1_exo,
+    Px1_exo,
+    A1,
+    PA1,
+    Q_exo,
+    R_exo,
+    H_exo,
+    predictors,
+    Tr_exo,
+    to_matrix(rates'),
+    depvar,
+    state_bound_type, state_lb, state_ub,
+    n_in_sample
+  );
+
+  y_pred = ssm_results_exo[1:N, 2:(1+1)];
 }
 model {
-
-  // beta_steps[1, ] ~ normal(0, 1);
-  // for(i in 1:P) beta_steps[2:N, i] ~ normal(0, mu[i]);
-  // beta_k ~ normal(0, 1);
-  // mu ~ normal(0, .1);
-  epsilon ~ normal(0, 1);
-  beta ~ normal(0, 1);
-  depvar ~ normal(depvar_predictions, epsilon);
 
   // initial state for each trend
   x0 ~ normal(0, 1); // initial state estimate at t=1
@@ -282,12 +725,22 @@ model {
       target += multi_normal_cholesky_lpdf(col(yall,i) | col(pred,i), diag_pre_multiply(sigma_vec, Lcorr));
     }
   }
+
+  sigma_channels ~ uniform(0, 1);
+  sigma_adstock  ~ uniform(0, sigma_adstock_ub);
+
+  for(i in 1:n_adstocked_channels) rates_raw[i] ~ normal(.5, .2)T[0, 1];
+
+  measurement_exo  ~ uniform(0, measurement_exo_ub);
+
+  target += sum(ssm_results_exo[1:n_in_sample, 1:1]);
 }
 generated quantities {
   vector[n_loglik] log_lik;
   matrix[n_pcor, n_pcor] Omega;
   matrix[n_pcor, n_pcor] Sigma;
   int<lower=0> j;
+
   j = 0;
 
   if(est_cor == 1) {
@@ -310,4 +763,5 @@ generated quantities {
       log_lik[i] = multi_normal_cholesky_lpdf(col(yall,i) | col(pred,i), diag_pre_multiply(sigma_vec, Lcorr));
     }
   }
+
 }

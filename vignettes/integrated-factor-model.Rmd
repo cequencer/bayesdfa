@@ -273,7 +273,7 @@ fit_dfa_pred <- function(y,
     predictors = predictors
   )
 
-  pars <- c("x", "Z", "sigma", "log_lik", "psi", "beta", "epsilon") # removed pred
+  pars <- c("x", "Z", "sigma", "log_lik", "psi", "beta", "epsilon", "beta_recovered") # removed pred
   if (est_correlation) pars <- c(pars, "Omega") # add correlation matrix
   if (estimate_nu) pars <- c(pars, "nu")
   if (estimate_trend_ar) pars <- c(pars, "phi")
@@ -320,18 +320,16 @@ fit_dfa_pred <- function(y,
 a = scale(weekly_clean_data[, 7:16], center = T, scale = T)
 depvar = scale(weekly_clean_data$total_sales, center = T, scale=T)[, 1]
 
-a = weekly_clean_data %>% select(1:7, total_sales) %>% scale
-
 mod = fit_dfa_pred(y = a,
   depvar = depvar,
   num_trends = 2,
   varIndx = NULL,
   zscore = T,
-  iter = 1000,
+  iter = 5000,
   cores = 2,
   chains = 2,
   thin = 1,
-  control = list(adapt_delta = 0.9, max_treedepth = 5),
+  control = list(adapt_delta = 0.99, max_treedepth = 5),
   nu_fixed = 20,
   est_correlation = FALSE,
   estimate_nu = T,
@@ -354,12 +352,14 @@ post = rstan::extract(mod)
 np = nuts_params(mod)
 trends = post$x %>% apply(c(2,3), mean) %>% t
 
-stan_trace(mod, "beta[6]")
-post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 2] %>% ts.plot()
+stan_trace(mod, "beta[1]")
+post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 1] %>% ts.plot()
 
 ```
 ```{r}
-mcmc_parcoord(mod, np = np, pars = vars(starts_with("beta")))
+mcmc_parcoord(mod, np = np, pars = vars(starts_with("beta_recovered")))
+print(mod, pars = "beta_recovered")
+
 ```
 
 
@@ -459,6 +459,8 @@ https://discourse.mc-stan.org/t/help-with-qr-decomposition-with-latent-variable/
 Okay wow the QR trick worked...
 
 Going to back out what the betas actually are 
+
+qr_thin way better -- interesting
 
 
 ## Next steps
