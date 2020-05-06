@@ -385,7 +385,6 @@ functions {
     return(ret);
   }
 }
-
 data {
   int<lower=0> N; // number of data points
   int<lower=0> P; // number of time series of data
@@ -443,6 +442,8 @@ data {
   real sigma_adstock_ub;
 
   real measurement_exo_ub;
+
+  int residualize;
 }
 transformed data {
 
@@ -459,6 +460,13 @@ transformed data {
   vector[P+K] A1           = rep_vector(0, P+K);
   matrix[P+K, P+K] PA1     = rep_matrix(0, P+K, P+K);
   int n_channels = P+K;
+  vector[P] predictor_means;
+  vector[P] predictor_scales;
+
+  for(i in 1:P) {
+    predictor_means[i]  = mean(predictors[, i]);
+    predictor_scales[i] = sd(predictors[, i]);
+  }
 
   for(i in 1:(P+K)) {
     if(rate_index[i] == 1) {
@@ -528,6 +536,7 @@ transformed parameters {
   matrix[P+K, P+K] Q_exo  = rep_matrix(1, P+K, P+K);
   matrix[P+K, P+K] R_exo  = rep_matrix(0, P+K, P+K);
   matrix[N, 1] y_pred;
+  matrix[N, P] rescaled_demeaned_preds;
   matrix[N, P+K] concat_predictors;
   vector[N] log_lik;
 
@@ -644,7 +653,15 @@ transformed parameters {
     }
   }
 
-  concat_predictors = append_col(x', predictors);
+  for(i in 1:P) {
+    rescaled_demeaned_preds[, i] = predictor_means[i] + pred[i, ]' * predictor_scales[i];
+  }
+  if(residualize == 1) {
+    concat_predictors = append_col(x', predictors - rescaled_demeaned_preds);
+  } else {
+    concat_predictors = append_col(x', predictors);
+  }
+
 
   ssm_results_exo = custom_adstock_filter_states(
     x1_exo,
