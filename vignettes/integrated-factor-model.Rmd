@@ -251,7 +251,19 @@ generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_d
   }
 
   chan_params_factor = recast::longify_chan_config(new_config)
-  return(chan_params_factor)
+  
+  other_data = list(
+    sigma_level_ub = mean(y_actual) / 500,
+    sigma_slope_ub = mean(y_actual) / 500,
+    sigma_seasons_ub = mean(y_actual) / 100,
+    sigma_adstock_ub = 100,
+    measurement_endo_ub = mean(y_actual) / 50,
+    measurement_exo_ub = mean(y_actual) / 50
+  )
+  
+  all_data = c(chan_params_factor, other_data)
+  
+  return(all_data)
 }
 
 ```

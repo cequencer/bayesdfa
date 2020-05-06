@@ -449,19 +449,21 @@ transformed data {
   int n_loglik; // dimension for loglik calculation
   vector[K] zeros;
   int smooth = 1;
-  int n_cols_return_exo    = 2 + 1 + 3*P;
-  int n_rows_return_exo    =N + P;
-  int n_in_sample          =N - n_holdout;
+  int n_cols_return_exo    = 2 + 1 + 3*(P+K);
+  int n_rows_return_exo    = N + (P+K);
+  int n_in_sample          = N - n_holdout;
   int n_adstocked_channels = sum(rate_index);
-  matrix[P+K, P+K] Tr_exo  = diag_matrix(rep_vector(1, P));
+  matrix[P+K, P+K] Tr_exo  = diag_matrix(rep_vector(1, P+K));
   matrix[P+K, P+K] Px1_exo = diag_matrix(Px1_vector);
-  vector[P+K] A1                  = rep_vector(0, P);
-  matrix[P+K, P+K] PA1     = rep_matrix(0, P, P);
+  vector[P+K] A1           = rep_vector(0, P+K);
+  matrix[P+K, P+K] PA1     = rep_matrix(0, P+K, P+K);
 
   for(i in 1:(P+K)) {
     if(rate_index[i] == 1) {
       A1[i]     = 0; // Z_exo[1, i] / 10;
-      PA1[i, i] =predictors[1, i] / 10;
+      if(i <= P) {
+        PA1[i, i] = predictors[1, i] / 10;
+      }
     } else {
       A1[i]     = 0;
       PA1[i, i] = 0;
@@ -519,10 +521,10 @@ transformed parameters {
   vector[K] indicator; // indicates whether diagonal is neg or pos
   vector[K] psi_root; // derived sqrt(expansion parameter psi)
   matrix[n_rows_return_exo,  n_cols_return_exo]  ssm_results_exo;
-  vector[P] rates;
+  vector[P+K] rates;
   matrix[1, 1] H_exo = rep_matrix(1, 1, 1);
-  matrix[P+K, P+K] Q_exo  = rep_matrix(1, P, P);
-  matrix[P+K, P+K] R_exo  = rep_matrix(0, P, P);
+  matrix[P+K, P+K] Q_exo  = rep_matrix(1, P+K, P+K);
+  matrix[P+K, P+K] R_exo  = rep_matrix(0, P+K, P+K);
   matrix[N, 1] y_pred;
   matrix[N, P+K] concat_predictors;
 
