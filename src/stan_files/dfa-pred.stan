@@ -426,17 +426,17 @@ data {
   int n_holdout;
 
   // channel expectations
-  vector[P] x1_exo;
-  vector[P] Px1_vector;
-  vector[P] sigma_channels_ub;
+  vector[P+K] x1_exo;
+  vector[P+K] Px1_vector;
+  vector[P+K] sigma_channels_ub;
   //// state constraints
-  vector[P] state_bound_type;
-  vector[P] state_lb;
-  vector[P] state_ub;
+  vector[P+K] state_bound_type;
+  vector[P+K] state_lb;
+  vector[P+K] state_ub;
   //// adstock constraints
-  int<lower=0, upper=1>  rate_index[P];
-  vector[P] rate_lb;
-  vector[P] rate_ub;
+  int<lower=0, upper=1>  rate_index[P+K];
+  vector[P+K] rate_lb;
+  vector[P+K] rate_ub;
 
   // constraints
   //// parameter constraints;
@@ -453,12 +453,12 @@ transformed data {
   int n_rows_return_exo    =N + P;
   int n_in_sample          =N - n_holdout;
   int n_adstocked_channels = sum(rate_index);
-  matrix[P, P] Tr_exo  = diag_matrix(rep_vector(1, P));
-  matrix[P, P] Px1_exo = diag_matrix(Px1_vector);
-  vector[P] A1                  = rep_vector(0, P);
-  matrix[P, P] PA1     = rep_matrix(0, P, P);
+  matrix[P+K, P+K] Tr_exo  = diag_matrix(rep_vector(1, P));
+  matrix[P+K, P+K] Px1_exo = diag_matrix(Px1_vector);
+  vector[P+K] A1                  = rep_vector(0, P);
+  matrix[P+K, P+K] PA1     = rep_matrix(0, P, P);
 
-  for(i in 1:P) {
+  for(i in 1:(P+K)) {
     if(rate_index[i] == 1) {
       A1[i]     = 0; // Z_exo[1, i] / 10;
       PA1[i, i] =predictors[1, i] / 10;
@@ -504,7 +504,7 @@ parameters {
   // our part
   vector<lower=0, upper=1>[n_adstocked_channels] rates_raw;
   real<lower=0, upper=measurement_exo_ub> measurement_exo;
-  vector<lower=0, upper=1>[P] sigma_channels;
+  vector<lower=0, upper=1>[P+K] sigma_channels;
   vector<lower=0, upper=sigma_adstock_ub>[n_adstocked_channels]    sigma_adstock;
 }
 transformed parameters {
@@ -521,9 +521,10 @@ transformed parameters {
   matrix[n_rows_return_exo,  n_cols_return_exo]  ssm_results_exo;
   vector[P] rates;
   matrix[1, 1] H_exo = rep_matrix(1, 1, 1);
-  matrix[P, P] Q_exo  = rep_matrix(1, P, P);
-  matrix[P, P] R_exo  = rep_matrix(0, P, P);
-  matrix[N, P] y_pred;
+  matrix[P+K, P+K] Q_exo  = rep_matrix(1, P, P);
+  matrix[P+K, P+K] R_exo  = rep_matrix(0, P, P);
+  matrix[N, 1] y_pred;
+  matrix[N, P+K] concat_predictors;
 
 
 
@@ -626,7 +627,7 @@ transformed parameters {
 
   { // spreading the raw rates to the rates vector
     int counter = 1;
-    for(i in 1:P) {
+    for(i in 1:(P+K)) {
       if(rate_index[i] == 1) {
         rates[i]   = rates_raw[counter] * (rate_ub[i] - rate_lb[i]) + rate_lb[i];
         R_exo[i,i] = sigma_adstock[counter];
@@ -638,6 +639,8 @@ transformed parameters {
     }
   }
 
+  concat_predictors = append_col(x', predictors);
+
   ssm_results_exo = custom_adstock_filter_states(
     x1_exo,
     Px1_exo,
@@ -646,7 +649,7 @@ transformed parameters {
     Q_exo,
     R_exo,
     H_exo,
-    predictors,
+    concat_predictors,
     Tr_exo,
     to_matrix(rates'),
     depvar,

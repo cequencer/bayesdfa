@@ -11,6 +11,7 @@ output: html_notebook
 library(tidyverse)
 library(rstan)
 library(bayesplot)
+library(recast)
 weekly_clean_data = read_csv("../../weekly_clean_data.csv")
 dfa_pred = stan_model("../src/stan_files/dfa-pred.stan")
 stanmodels <- list()
@@ -18,102 +19,27 @@ stanmodels$dfa_pred = dfa_pred
 ```
 
 
-- have to include the predictors matrix into the stan object (rn it is y)
-- have to set z-score = F (what will that do)
-- 
-- 
+The first thing I need to do is to generate all the parameters for the factor part of the model:
+
 
 ```{r}
-#' Fit a Bayesian DFA
-#'
-#' @param y A matrix of data to fit. See `data_shape` option to specify whether
-#'   this is long or wide format data.
-#' @param num_trends Number of trends to fit.
-#' @param varIndx Indices indicating which timeseries should have shared
-#'   variances.
-#' @param zscore Logical. Should the data be standardized first? If not it is
-#'   just centered. Centering is necessary because no intercept is included.
-#' @param iter Number of iterations in Stan sampling, defaults to 2000.
-#' @param thin Thinning rate in Stan sampling, defaults to 1.
-#' @param chains Number of chains in Stan sampling, defaults to 4.
-#' @param control A list of options to pass to Stan sampling. Defaults to
-#'   `list(adapt_delta = 0.99, max_treedepth = 20)`.
-#' @param nu_fixed Student t degrees of freedom parameter. If specified as
-#'   greater than 100, a normal random walk is used instead of a random walk
-#'   with a t-distribution. Defaults to `101`.
-#' @param est_correlation Boolean, whether to estimate correlation of
-#'   observation error matrix `R`. Defaults to `FALSE`.
-#' @param estimate_nu Logical. Estimate the student t degrees of freedom
-#'   parameter? Defaults to `FALSE`,
-#' @param estimate_trend_ar Logical. Estimate AR(1) parameters on DFA trends?
-#'   Defaults to `FALSE``, in which case AR(1) parameters are set to 1
-#' @param estimate_trend_ma Logical. Estimate MA(1) parameters on DFA trends?
-#'   Defaults to `FALSE``, in which case MA(1) parameters are set to 0.
-#' @param sample Logical. Should the model be sampled from? If `FALSE`, then the
-#'   data list object that would have been passed to Stan is returned instead.
-#'   This is useful for debugging and simulation. Defaults to `TRUE`.
-#' @param data_shape If `wide` (the current default) then the input data should
-#'   have rows representing the various timeseries and columns representing the
-#'   values through time. This matches the MARSS input data format. If `long`
-#'   then the input data should have columns representing the various timeseries
-#'   and rows representing the values through time.
-#' @param obs_covar Optional dataframe of data with 4 named columns ("time","timeseries","covariate","value"), representing: (1) time, (2) the time series
-#'   affected, (3) the covariate number for models with more than one covariate affecting each
-#'   trend, and (4) the value of the covariate
-#' @param pro_covar Optional dataframe of data with 4 named columns ("time","trend","covariate","value"), representing: (1) time, (2) the trend
-#'   affected, (3) the covariate number for models with more than one covariate affecting each
-#'   trend, and (4) the value of the covariate
-#' @param ... Any other arguments to pass to [rstan::sampling()].
-#' @details Note that there is nothing restricting the loadings and trends from
-#'   being inverted (i.e. multiplied by `-1`) for a given chain. Therefore, if
-#'   you fit multiple chains, the package will attempt to determine which chains
-#'   need to be inverted using the function [find_inverted_chains()].
-#' @seealso plot_loadings plot_trends rotate_trends find_swans
-#'
-#' @export
-#'
-#' @importFrom rstan sampling
-#' @import Rcpp
-#' @importFrom graphics lines par plot points polygon segments
-#' @importFrom stats na.omit
-#'
-#' @examples
-#' set.seed(42)
-#' s <- sim_dfa(num_trends = 1, num_years = 20, num_ts = 3)
-#' # only 1 chain and 250 iterations used so example runs quickly:
-#' m <- fit_dfa(y = s$y_sim, iter = 250, chains = 1)
-#'\dontrun{
-#' # example of observation error covariates
-#' obs_covar = expand.grid("time"=1:20,"timeseries"=1:3,"covariate"=1)
-#' obs_covar$value=rnorm(nrow(obs_covar),0,0.1)
-#' m <- fit_dfa(y = s$y_sim, iter = 250, chains = 1, obs_covar=obs_covar)
-#'
-#' # example of process error covariates
-#' pro_covar = expand.grid("time"=1:20,"trend"=1:3,"covariate"=1)
-#' pro_covar$value=rnorm(nrow(pro_covar),0,0.1)
-#' m <- fit_dfa(y = s$y_sim, iter = 250, chains = 1, pro_covar=pro_covar)
-#'}
-
-fit_dfa_pred <- function(y,
-                         depvar,
+.generate_factor_stan_data <- function(
+                    y,
+                    depvar,
                     num_trends = 1,
                     varIndx = NULL,
                     zscore = T,
-                    iter = 2000,
-                    chains = 4,
-                    thin = 1,
-                    control = list(adapt_delta = 0.99, max_treedepth = 20),
                     nu_fixed = 101,
                     est_correlation = FALSE,
                     estimate_nu = FALSE,
                     estimate_trend_ar = FALSE,
                     estimate_trend_ma = FALSE,
                     sample = TRUE,
-                    data_shape = c("wide", "long"),
+                    data_shape = "long",
                     obs_covar = NULL,
-                    pro_covar = NULL,
-                    ...) {
+                    pro_covar = NULL) {
   predictors <- y
+  
   data_shape <- match.arg(data_shape)
   if (ncol(y) > nrow(y) && data_shape == "long") {
     warning(
@@ -273,207 +199,90 @@ fit_dfa_pred <- function(y,
     predictors = predictors
   )
 
-  pars <- c("x", "Z", "sigma", "log_lik", "psi", "beta", "epsilon", "beta_recovered") # removed pred
-  if (est_correlation) pars <- c(pars, "Omega") # add correlation matrix
-  if (estimate_nu) pars <- c(pars, "nu")
-  if (estimate_trend_ar) pars <- c(pars, "phi")
-  if (estimate_trend_ma) pars <- c(pars, "theta")
-  if(!is.null(obs_covar)) pars = c(pars, "b_obs")
-  if(!is.null(pro_covar)) pars = c(pars, "b_pro")
+  return(data_list)
+}
 
-  sampling_args <- list(
-    object = stanmodels$dfa_pred,
-    data = data_list,
-    pars = pars,
-    control = control,
-    chains = chains,
-    iter = iter,
-    thin = thin,
-    ...
+generate_factor_stan_data <- function(depvar_name, chan_names, ...) {
+  
+  depvar = select(weekly_clean_data, !!depvar_name)
+  y      = as.data.frame(weekly_clean_data[, chan_names])
+  
+  
+  .generate_factor_stan_data(y, depvar, ...)
+}
+
+```
+
+The second thing I need to do is to generate all the parameters for the custom filter part of the model: 
+
+```{r}
+
+generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_dir) {
+
+  y_actual = weekly_clean_data[, depvar_name][[1]]
+  
+  if(file.exists(file.path(tempdir(), "test_sim.yaml"))) {
+    file.remove(file.path(tempdir(), "test_sim.yaml"))
+  }
+  
+  recast::create_default_chan_config(
+    subset_name = "test",
+    depvar_name = "sim",
+    chan_names = chan_names, 
+    config_dir = config_dir
   )
 
-  if (sample) {
-    mod <- do.call(sampling, sampling_args)
-    # if (chains > 1) {
-    #   out <- invert_chains(mod, trends = num_trends, print = FALSE)
-    # } else {
-    #   e <- rstan::extract(mod, permuted = FALSE)
-    #   ep <- rstan::extract(mod, permuted = TRUE)
-    #   out <- list(
-    #     model = mod, samples_permuted = ep, samples = e,
-    #     monitor = rstan::monitor(e)
-    #   )
-    # }
-    # 
-    # out[["data"]] <- Y # keep data included
-    # out <- structure(out, class = "bayesdfa")
-    out <- mod
-  } else {
-    out <- data_list
+  orig_config = yaml::read_yaml(file.path(config_dir, "test_sim.yaml"))
+
+  trend_template = orig_config[1]
+
+  trend_template[[1]]$ub = Inf
+  trend_template[[1]]$lb = -Inf
+  trend_template[[1]]$q80 = sd(y_actual)/10
+  trend_template[[1]]$q20 = -sd(y_actual)/10
+  trend_template[[1]]$mu = 0.0001
+  trend_template[[1]]$adstock = 0
+
+  new_config = orig_config
+  for(i in num_trends:1) {
+    trend_component = trend_template
+    names(trend_component)[1] = str_c("t", i)
+    new_config = c(trend_component, new_config)
   }
-  out
+
+  chan_params_factor = recast::longify_chan_config(new_config)
+  return(chan_params_factor)
 }
 
 ```
 
-```{r}
-a = scale(weekly_clean_data[, 7:16], center = T, scale = T)
-depvar = scale(weekly_clean_data$total_sales, center = T, scale=T)[, 1]
+Now I need to put it all together:
 
-mod = fit_dfa_pred(y = a,
-  depvar = depvar,
-  num_trends = 2,
-  varIndx = NULL,
-  zscore = T,
-  iter = 5000,
-  cores = 2,
-  chains = 2,
-  thin = 1,
-  control = list(adapt_delta = 0.99, max_treedepth = 5),
-  nu_fixed = 20,
-  est_correlation = FALSE,
-  estimate_nu = T,
-  estimate_trend_ar = F,
-  estimate_trend_ma = F,
-  sample = TRUE,
-  data_shape = "long",
-  obs_covar = NULL,
-  pro_covar = NULL,
-  verbose = T
+```{r}
+
+chan_names = colnames(weekly_clean_data)[7:16]
+depvar_name = "total_sales"
+config_dir = tempdir()
+
+factor_data = generate_factor_stan_data(depvar_name, chan_names, num_trends = 3, estimate_nu = T, 
+                                        zscore = T)
+
+channel_data = generate_obs_stan_data(depvar_name, chan_names, num_trends = 3, config_dir)
+
+stan_data = c(factor_data, channel_data, n_holdout = 0)
+
+```
+
+And finally, to start sampling:
+
+```{r}
+
+fuck = sampling(
+  stanmodels$dfa_pred,
+  stan_data,
+  iter = 1,
+  chains = 1
 )
-```
-
-
-Turns out that you have to keep estimate_ma and ar terms = F
-
-
-```{r}
-post = rstan::extract(mod)
-np = nuts_params(mod)
-trends = post$x %>% apply(c(2,3), mean) %>% t
-
-stan_trace(mod, "beta[1]")
-post$x[, , ] %>% apply(c(2,3), mean) %>% t %>% .[, 1] %>% ts.plot()
 
 ```
-```{r}
-mcmc_parcoord(mod, np = np, pars = vars(starts_with("beta_recovered")))
-print(mod, pars = "beta_recovered")
-
-```
-
-
-## Notes
-- Okay so it seems that the inputs need to be scaled for this to work
-- I thought I had run that model on dfa-pred, but I had not
-- Dang, okay running it now
-
-- Took foooorever. Going to run w/ 1000 iter. 
-- Okay even w/ 100 iterations, this doesn't work. Time to follow the folk theorem
-
-- The beta_k scale was wacky - pulled that down
-- Still taking forever. Need to pare this back and go piece by piece. 
-- Making beta a fixed vector
-
-- Ok this is quite ridiculous. Taking out even beta and seeing what happens.
-- Ok I hadn't commented out beta in the xformed params block so maybe that fucked things
-
-- Okay now going to take beta out. 
-
-- Ok the beta really makes it all run super slow. Damn it. 
-
-- Not sure what the best way is forward from here. Let's try another beta run..
-- Found some issues w/ what I was doing before. Hope this goes better. 
-- Damn it--still gets suck. 
-
-- Exploring a hunch that the model is unidentified with symmetry. Constraining beta > 0.
-- Didn't seem to work. Fuck.
-
-- Going to start with an init... 
-- Still no joy
-
-- GOD DAMN IT. 
-- Okay going to do some step size jittering. 
-- Okay nevermind betanalpha says not to
-
-- Okay going to run it on some very very small data.
-- Trying to follow this: https://discourse.mc-stan.org/t/large-model-runs-very-slowly/1325/4
-
-- MAX TREEDEPTH WAS 20 WTFFF
-- Okay reducing the treedepth does a lot
-- The model does not appear to be well identified
-- Need to look at the posterior draws and see which parameters are correlated
--> beta and Z, perhaps? 
-
-- unclear, since there was so little movement in the parameters
-- believe that i need to have a bigger step size in the adaptation phase
-
-- i did -- but now I think that i need to constrain beta > 0
-
-- new strategy -- i think i should perhaps let adapt_delta be small and see where there are divergences...
-
-- new theory is that i need to qr decompose my model
-
-data {
-  int<lower=1> N;
-  int<lower=1> M;
-  matrix[M, N] X;
-  // mine is transposed
-  [N, M] X
-  vector[N] y;
-}
-
-transformed data {
-  // Compute, thin, and then scale QR decomposition
-  matrix[N, M] Q = qr_Q(X')[, 1:M] * N;
-  
-  // so i don't need to transpose my X here...
-  
-  matrix[M, M] R = qr_R(X')[1:M, ] / N;
-  matrix[M, M] R_inv = inverse(R);
-}
-
-Hmm -- that blew up gradient evaluation. That computation is way too expensive to be done inside transformed parameters
-
-Maybe i do it just on the predictors? Let's see about that.
-
-This did bring back down the gradient time, but why should this work in theory? The first factor is just likely to be a problem in any case
-
-Okay early indications are positive here! Ran it with treedepth = 5 and adapt_delta = .9
-Lots of divergences but I think that this is due to the stepsize being a bit larger
-Can always bring the adapt_delta up
-
-Okay bringing adapt delta essentially removed the issues but how TF would I do adstock xformation on a QR decomposed matrix... something for another time...
-
-One additional thought of the night -- doing the QR decomposition on the matrix is pretty key and maybe worth the extra time in gradient evaluation
-
-Also -- we don't need to esimate the effectiveness of the channels over the whole time period
-Could take averages or something like that...
-
-Jesus all of this just suxxx
-Going to do the QR thing on our predictors again and blow up gradient computation time
-
-Here is a good resource on multimodality:
-https://discourse.mc-stan.org/t/help-with-qr-decomposition-with-latent-variable/14838/9
-
-Okay wow the QR trick worked...
-
-Going to back out what the betas actually are 
-
-qr_thin way better -- interesting
-
-
-## Next steps
-
-- This *is scaled* 
-- Also *this doesn't include adstocking!* 
-
-
-
-
-
-
-
-
-
 
