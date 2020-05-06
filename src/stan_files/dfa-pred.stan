@@ -445,6 +445,7 @@ data {
   real measurement_exo_ub;
 }
 transformed data {
+
   int n_pcor; // dimension for cov matrix
   int n_loglik; // dimension for loglik calculation
   vector[K] zeros;
@@ -457,6 +458,7 @@ transformed data {
   matrix[P+K, P+K] Px1_exo = diag_matrix(Px1_vector);
   vector[P+K] A1           = rep_vector(0, P+K);
   matrix[P+K, P+K] PA1     = rep_matrix(0, P+K, P+K);
+  int n_channels = P+K;
 
   for(i in 1:(P+K)) {
     if(rate_index[i] == 1) {
@@ -527,6 +529,7 @@ transformed parameters {
   matrix[P+K, P+K] R_exo  = rep_matrix(0, P+K, P+K);
   matrix[N, 1] y_pred;
   matrix[N, P+K] concat_predictors;
+  vector[N] log_lik;
 
 
 
@@ -660,6 +663,8 @@ transformed parameters {
   );
 
   y_pred = ssm_results_exo[1:N, 2:(1+1)];
+  log_lik = to_vector(ssm_results_exo[1:N, 1:1]);
+
 }
 model {
 
@@ -738,34 +743,38 @@ model {
 
   measurement_exo  ~ uniform(0, measurement_exo_ub);
 
-  target += sum(ssm_results_exo[1:n_in_sample, 1:1]);
+  target += sum(log_lik);
 }
 generated quantities {
-  vector[n_loglik] log_lik;
-  matrix[n_pcor, n_pcor] Omega;
-  matrix[n_pcor, n_pcor] Sigma;
-  int<lower=0> j;
+  matrix[N, n_channels] alpha;
+  matrix[N, n_channels] alpha_lower;
+  matrix[N, n_channels] alpha_upper;
+  matrix[N, n_channels] Px_diag;
+  matrix[N, n_channels] adstocks;
+  matrix[N, n_channels] channel_spend_impact;
+  matrix[N, n_channels] channel_spend_impact_lower;
+  matrix[N, n_channels] channel_spend_impact_upper;
 
-  j = 0;
+  matrix[n_channels, n_channels] Px;
+  matrix[n_channels, n_channels] PA;
+  matrix[n_rows_return_exo,  n_cols_return_exo] ssm_results;
 
-  if(est_cor == 1) {
-    Omega = multiply_lower_tri_self_transpose(Lcorr);
-    Sigma = quad_form_diag(Omega, sigma_vec);
+  alpha  = ssm_results_exo[1:N, (1+2):(n_channels+1+1)];
+  adstocks = ssm_results_exo[1:N, (n_channels+1+2):(2*n_channels+1+1)];
+  Px = ssm_results_exo[(N+1):(N+n_channels), (1+2):(n_channels+1+1)];
+  PA = ssm_results_exo[(N+1):(N+n_channels), (n_channels+1+2):(2*n_channels+1+1)];
+  Px_diag = ssm_results_exo[1:N, (2*n_channels+1+3):(2*n_channels+1+2+n_channels)];
+
+  for(i in 1:N) {
+    alpha_lower[i, ] = constrain_a(alpha[i, ]' - 1.15 * sqrt(Px_diag[i, ])', state_bound_type, state_lb, state_ub)';
+    alpha_upper[i, ] = constrain_a(alpha[i, ]' + 1.15 * sqrt(Px_diag[i, ])', state_bound_type, state_lb, state_ub)';
   }
 
-  // calculate pointwise log_lik for loo package:
-  if(est_cor == 0) {
-    j = 0;
-    for(n in 1:N) {
-      for(p in 1:P) {
-        j = j + 1;
-        log_lik[j] = normal_lpdf(yall[p,n] | pred[p,n], sigma_vec[p]);
-      }
-    }
-  } else {
-    // TODO: this needs to be fixed:
-    for(i in 1:N) {
-      log_lik[i] = multi_normal_cholesky_lpdf(col(yall,i) | col(pred,i), diag_pre_multiply(sigma_vec, Lcorr));
+  for(i in 1:N) {
+    for(j in 1:n_channels) {
+      channel_spend_impact[i, j]       = alpha[i, j] / (1 - rates[j]);
+      channel_spend_impact_lower[i, j] = alpha_lower[i, j] / (1 - rates[j]);
+      channel_spend_impact_upper[i, j] = alpha_upper[i, j] / (1 - rates[j]);
     }
   }
 

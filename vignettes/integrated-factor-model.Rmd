@@ -292,9 +292,56 @@ And finally, to start sampling:
 fuck = sampling(
   stanmodels$dfa_pred,
   stan_data,
-  iter = 1,
-  chains = 1
+  iter = 100,
+  chains = 2,
+  cores = 2,
+  control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
 )
 
 ```
+
+ 3822.41 seconds (Total) with 
+   iter = 100,
+  chains = 2,
+  cores = 2,
+  control = list(adapt_delta = .99, max_treedepth = 10),
+ 
+
+```{r}
+stan_trace(fuck, "rates")
+```
+
+And it converged!!!!!
+
+```{r}
+post = rstan::extract(fuck)
+```
+
+```{r}
+library(loo)
+log_lik <- extract_log_lik(fuck, merge_chains = FALSE)
+r_eff <- relative_eff(exp(log_lik))
+leeloo <- loo(log_lik, r_eff = r_eff, cores = 2)
+leeloo
+```
+
+```{r}
+fucktwelve = vb(
+  stanmodels$dfa_pred,
+  stan_data,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+fuckfuck = rstan::extract(fucktwelve)
+
+
+```
+
+
+
 
