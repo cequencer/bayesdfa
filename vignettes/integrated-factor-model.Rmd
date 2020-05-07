@@ -525,3 +525,68 @@ fit$stopping$t207 = vb(
 post$stopping$t207 = rstan::extract(fit$stopping$t207)
 ```
 
+```{r}
+
+cbind(
+  post$stopping$t207$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, 4],
+  post$large$three$channel_spend_impact %>% apply(c(2,3), mean) %>% .[-208, 4]
+) %>% 
+  ts.plot()
+
+
+
+```
+
+How does the model do on DW? 
+
+```{r}
+cbind.data.frame(
+  actual   = weekly_clean_data$total_sales,
+  predicted = post$large$three$y_pred %>% apply(c(2,3), mean)
+) %>% 
+  with(dwtest(actual~predicted))
+```
+
+What does Loo say about looking at only the last 100 days of data
+
+
+
+```{r}
+leeloo$large$three_sub = loo::loo(log_lik$large$three[, , 100:208], r_eff = r_eff$large$three[100:208], cores = 2)
+```
+Do our poorly estimated time series correspond with big jumps in the trends?
+
+```{r}
+ts.plot(weekly_clean_data$total_sales)
+abline(v = (loo::pareto_k_ids(leeloo$large$three_sub) + 99), col = "darkred")
+```
+
+Let's rotate the trends
+
+```{r}
+Z = post$large$three$Z %>% apply(c(2,3), mean)
+unrottrends = post$large$three$x %>% apply(c(2,3), mean)
+Hinv = varimax(Z)$rotmat
+trends = t(solve(Hinv) %*% unrottrends)
+dtrends = trends %>% apply(2, diff)
+emp_sd = dtrends %>% apply(2, sd)
+which((1-pnorm(abs(dtrends[, 1]), 0, sd = emp_sd[1])) < 0.01)
+which((1-pnorm(abs(dtrends[, 2]), 0, sd = emp_sd[2])) < 0.01)
+which((1-pnorm(abs(dtrends[, 3]), 0, sd = emp_sd[3])) < 0.01)
+(loo::pareto_k_ids(leeloo$large$three_sub) + 100)
+
+ts.plot(weekly_clean_data$total_sales)
+abline(v = (loo::pareto_k_ids(leeloo$large$three_sub) + 99), col = "darkred")
+abline(v = which((1-pnorm(abs(dtrends[, 2]), 0, sd = emp_sd[2])) < 0.01), col = "darkblue")
+legend("topleft", c("sales", "poorly estim points", "swans"), 
+       col = c("black", "darkred", "darkblue"), lty = 1)
+```
+
+
+
+
+
+Need to figure out how to constrain rates more. 
+
+
+
