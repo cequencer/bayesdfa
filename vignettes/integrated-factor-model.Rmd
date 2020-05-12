@@ -582,11 +582,62 @@ legend("topleft", c("sales", "poorly estim points", "swans"),
        col = c("black", "darkred", "darkblue"), lty = 1)
 ```
 
+Tests
+1. Run new model with the away data
+2. Run model with bombas data + noise
+3. Run model with pure noise
+4. Run bombas + smoothing
 
 
+## testing with noise
 
+```{r}
+data_list$noise <- data_list$full
 
-Need to figure out how to constrain rates more. 
+data_list$noise$noise <- cumsum(rnorm(nrow(data_list$full), 0, sd = 10))
 
+current_data <- data_list$noise
 
+chan_names$noise = colnames(current_data)[c(3:24, 38)]
+
+factor_data$noise = generate_factor_stan_data(depvar_name, 
+                                              chan_names$noise, num_trends = 3, 
+                                              estimate_nu = T, 
+                                              zscore = T)
+
+channel_data$noise = generate_obs_stan_data(depvar_name, chan_names$noise, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$noise = c(factor_data$noise, channel_data$noise, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+stan_data$noise$x1_exo[26] = 0
+stan_data$noise$state_bound_type[26] = 3
+stan_data$noise$Px1_vector[26]
+```
+
+```{r}
+fit$noise = vb(
+  stanmodels$dfa_pred,
+  stan_data$noise,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$noise = rstan::extract(fit$noise)
+```
+
+Is it actually noise?
+
+```{r}
+m = post$noise$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, 26] 
+s = post$noise$Px_diag %>% apply(c(2,3), mean) %>% .[, 26] 
+
+ts.plot(cbind(m+2*s, m, m-2*s), col = c("darkred", "black", "darkred"), lty = c(2,1,2))
+
+```
 
