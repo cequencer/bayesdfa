@@ -641,3 +641,69 @@ ts.plot(cbind(m+2*s, m, m-2*s), col = c("darkred", "black", "darkred"), lty = c(
 
 ```
 
+Okay, now going to test Away data
+
+```{r}
+
+data_list$away <- read_csv("../../hermes20200512.csv")
+
+current_data <- data_list$away
+
+colnames(current_data)
+
+chan_names$away = colnames(current_data)[c(8, 10:35)]
+
+factor_data$away = generate_factor_stan_data(depvar_name, 
+                                              chan_names$away, num_trends = 3, 
+                                              estimate_nu = T, 
+                                              zscore = T)
+
+channel_data$away = generate_obs_stan_data(depvar_name, chan_names$away, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+stan_data$away = c(factor_data$away, channel_data$away, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+stan_data$away$x1_exo[29] = 0
+stan_data$away$state_bound_type[29] = 3
+stan_data$away$Px1_vector[29]
+
+```
+
+```{r}
+fit$away = vb(
+  stanmodels$dfa_pred,
+  stan_data$away,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$away = rstan::extract(fit$away)
+```
+
+```{r}
+post$away$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, 29] %>% ts.plot()
+```
+
+
+```{r}
+tmp <- 1:length(colnames(data_list$away[, chan_names$away])) + 3
+names(tmp) <- colnames(data_list$away[, chan_names$away])
+
+tmp[data_list$away[, chan_names$away] %>% 
+  apply(2, mean) %>% 
+  sort(d = T) %>% 
+  names]
+  
+
+idx = 25
+m = post$away$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, idx] 
+s = post$away$Px_diag %>% apply(c(2,3), mean) %>% .[, idx] %>% sqrt
+
+ts.plot(cbind(m+2*s, m, m-2*s), col = c("darkred", "black", "darkred"), lty = c(2,1,2))
+```
+
