@@ -669,6 +669,7 @@ stan_data$away$x1_exo[29] = 0
 stan_data$away$state_bound_type[29] = 3
 stan_data$away$Px1_vector[29]
 
+
 ```
 
 ```{r}
@@ -694,16 +695,61 @@ post$away$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, 29] %>% ts.plot()
 tmp <- 1:length(colnames(data_list$away[, chan_names$away])) + 3
 names(tmp) <- colnames(data_list$away[, chan_names$away])
 
-tmp[data_list$away[, chan_names$away] %>% 
+(tmp2 <- tmp[data_list$away[, chan_names$away] %>% 
   apply(2, mean) %>% 
   sort(d = T) %>% 
-  names]
+  names])
   
 
-idx = 25
+idx = 11
 m = post$away$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, idx] 
 s = post$away$Px_diag %>% apply(c(2,3), mean) %>% .[, idx] %>% sqrt
 
-ts.plot(cbind(m+2*s, m, m-2*s), col = c("darkred", "black", "darkred"), lty = c(2,1,2))
+ts.plot(cbind(m+2*s, m, m-2*s), col = c("darkred", "black", "darkred"), lty = c(2,1,2), main = names(tmp2)[which(tmp2 == idx)])
 ```
+
+
+
+```{r}
+y_pred = post$away$y_pred %>% apply(c(2,3), mean)
+
+cbind(y_pred, factor_data$away$depvar) %>% 
+  ts.plot(col = c("darkred", "darkblue"))
+
+cbind.data.frame(pred = y_pred, actual = factor_data$away$depvar) %>% 
+  with(., dwtest(total_sales~pred))
+
+cbind.data.frame(pred = y_pred, actual = factor_data$away$depvar) %>% 
+  mutate(res = total_sales-pred) %>% 
+  pull(res) %>% 
+  sd %>% 
+  cat("RMSE is", scales::dollar(.), "\n")
+
+cbind.data.frame(pred = y_pred, actual = factor_data$away$depvar) %>% 
+  mutate(res = total_sales-pred) %>% 
+  pull(res) %>% 
+  ts.plot()
+
+cbind.data.frame(pred = y_pred, actual = factor_data$away$depvar) %>% 
+  mutate(res = total_sales-pred) %>% 
+  mutate(ape = abs(res)/total_sales) %>% 
+  pull(ape) %>% 
+  mean %>% 
+  cat("MAPE is", scales::percent(.), "\n")
+```
+
+
+
+```{r}
+log_lik$away <- extract_log_lik(fit$away, merge_chains = FALSE)
+r_eff$away <- relative_eff(exp(log_lik$away ))
+leeloo$away <- loo(log_lik$away, r_eff = r_eff$away, cores = 2)
+leeloo$away
+
+pareto_k_ids(leeloo$away, threshold = 1)
+
+ts.plot(factor_data$away$depvar)
+abline(v = pareto_k_ids(leeloo$away, threshold = .7), col = "darkred")
+```
+
 
