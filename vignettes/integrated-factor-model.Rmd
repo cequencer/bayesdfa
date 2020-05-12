@@ -753,3 +753,375 @@ abline(v = pareto_k_ids(leeloo$away, threshold = .7), col = "darkred")
 ```
 
 
+
+```{r}
+fit_dfa <- function(y = y,
+                    num_trends = 1,
+                    varIndx = NULL,
+                    zscore = TRUE,
+                    iter = 2000,
+                    chains = 4,
+                    thin = 1,
+                    control = list(adapt_delta = 0.99, max_treedepth = 20),
+                    nu_fixed = 101,
+                    est_correlation = FALSE,
+                    estimate_nu = FALSE,
+                    estimate_trend_ar = FALSE,
+                    estimate_trend_ma = FALSE,
+                    sample = TRUE,
+                    data_shape = c("wide", "long"),
+                    obs_covar = NULL,
+                    pro_covar = NULL,
+                    ...) {
+  data_shape <- match.arg(data_shape)
+  if (ncol(y) > nrow(y) && data_shape == "long") {
+    warning(
+      "ncol(y) > nrow(y) and data_shape == 'long'; are you sure your",
+      "input data is in long format?"
+    )
+  }
+  if (ncol(y) < nrow(y) && data_shape == "wide") {
+    warning(
+      "ncol(y) < nrow(y) and data_shape == 'wide'; are you sure your",
+      "input data is in wide format?"
+    )
+  }
+  if (data_shape == "long") {
+    y <- t(y)
+  }
+
+  if (nrow(y) < 3) {
+    stop("fit_dfa() only works with 3 or more time series. We detected ",
+      nrow(y), " time series.")
+  }
+
+  if(!is.null(obs_covar)) {
+    if(ncol(obs_covar) != 4) {
+      stop("observation covariates must be in a data frame with 4 columns")
+    }
+  }
+  if(!is.null(pro_covar)) {
+    if(ncol(pro_covar) != 4) {
+      stop("process covariates must be in a data frame with 4 columns")
+    }
+  }
+
+  # parameters for DFA
+  N <- ncol(y) # number of time steps
+  P <- nrow(y) # number of time series
+  K <- num_trends # number of dfa trends
+  nZ <- P * K - sum(seq_len(K)) # number of non-zero parameters that are unconstrained
+
+  for (i in seq_len(P)) {
+    if (zscore) {
+      if (length(unique(na.omit(c(y[i, ])))) == 1L) {
+        stop("Can't scale one or more of the time series because all values ",
+          "are the same. Remove this/these time series or set `zscore = FALSE`.",
+          call. = FALSE
+        )
+      }
+      y[i, ] <- scale(y[i, ], center = TRUE, scale = TRUE)
+    } else {
+      y[i, ] <- scale(y[i, ], center = TRUE, scale = FALSE)
+    }
+  }
+  Y <- y # included in returned object at end
+
+  # mat_indx now references the unconstrained values of the Z matrix.
+  mat_indx <- matrix(0, P, K)
+  start <- 1
+  for (k in seq_len(K)) {
+    for (p in seq(k + 1, P)) {
+      mat_indx[p, k] <- start
+      start <- start + 1
+    }
+  }
+  # row_indx and col_indx now references the unconstrained values of the Z matrix.
+  row_indx <- matrix((rep(seq_len(P), K)), P, K)[mat_indx > 0]
+  col_indx <- matrix(sort(rep(seq_len(K), P)), P, K)[mat_indx > 0]
+
+  diag(mat_indx) <- 1
+  row_indx_z <- matrix((rep(seq_len(P), K)), P, K)[mat_indx == 0]
+  col_indx_z <- matrix(sort(rep(seq_len(K), P)), P, K)[mat_indx == 0]
+  row_indx_z <- c(row_indx_z, 0, 0) # +2 zeros for making stan ok with data types
+  col_indx_z <- c(col_indx_z, 0, 0) # +2 zeros for making stan ok with data types
+  nZero <- length(row_indx_z)
+
+  # set the model up to have shared variances
+  if (is.null(varIndx)) {
+    varIndx <- rep(1, P)
+  }
+  nVariances <- length(unique(varIndx))
+
+  # indices of positive values - Stan can't handle NAs
+  row_indx_pos <- matrix(rep(seq_len(P), N), P, N)[!is.na(y)]
+  col_indx_pos <- matrix(sort(rep(seq_len(N), P)), P, N)[!is.na(y)]
+  n_pos <- length(row_indx_pos)
+
+  row_indx_na <- matrix(rep(seq_len(P), N), P, N)[is.na(y)]
+  col_indx_na <- matrix(sort(rep(seq_len(N), P)), P, N)[is.na(y)]
+  n_na <- length(row_indx_na)
+
+  y <- y[!is.na(y)]
+
+  # flag for whether to use a normal dist
+  use_normal <- if (nu_fixed > 100) 1 else 0
+  if (estimate_nu) use_normal <- 0 # competing flags
+
+  # covariates
+  if(!is.null(obs_covar)) {
+    obs_covar_index = as.matrix(obs_covar[,c("time","timeseries","covariate")])
+    num_obs_covar = nrow(obs_covar_index)
+    n_obs_covar = length(unique(obs_covar_index[,"covariate"]))
+    obs_covar_value = obs_covar[,"value"]
+  } else {
+    num_obs_covar = 0
+    n_obs_covar = 0
+    obs_covar_value = c(0)[0]
+    obs_covar_index = matrix(0,1,3)[c(0)[0],]
+  }
+  if(!is.null(pro_covar)) {
+    pro_covar_index = as.matrix(pro_covar[,c("time","trend","covariate")])
+    num_pro_covar = nrow(pro_covar_index)
+    n_pro_covar = length(unique(pro_covar_index[,"covariate"]))
+    pro_covar_value = pro_covar[,"value"]
+  } else {
+    num_pro_covar = 0
+    n_pro_covar = 0
+    pro_covar_value = c(0)[0]
+    pro_covar_index = matrix(0,1,3)[c(0)[0],]
+  }
+
+  data_list <- list(
+    N = N,
+    P = P,
+    K = K,
+    nZ = nZ,
+    y = y,
+    row_indx = row_indx,
+    col_indx = col_indx,
+    nZero = nZero,
+    varIndx = varIndx,
+    nVariances = nVariances,
+    row_indx_z = row_indx_z,
+    col_indx_z = col_indx_z,
+    nZero = nZero,
+    row_indx_z = row_indx_z,
+    col_indx_z = col_indx_z,
+    row_indx_pos = row_indx_pos,
+    col_indx_pos = col_indx_pos,
+    n_pos = n_pos,
+    row_indx_na = row_indx_na,
+    col_indx_na = col_indx_na,
+    n_na = n_na,
+    nu_fixed = nu_fixed,
+    estimate_nu = as.integer(estimate_nu),
+    use_normal = use_normal,
+    est_cor = as.numeric(est_correlation),
+    est_phi = as.numeric(estimate_trend_ar),
+    est_theta = as.numeric(estimate_trend_ma),
+    num_obs_covar = num_obs_covar,
+    n_obs_covar = n_obs_covar,
+    obs_covar_value = obs_covar_value,
+    obs_covar_index = obs_covar_index,
+    num_pro_covar = num_pro_covar,
+    n_pro_covar = n_pro_covar,
+    pro_covar_value = pro_covar_value,
+    pro_covar_index = pro_covar_index
+  )
+
+  pars <- c("x", "Z", "sigma", "log_lik", "psi") # removed pred
+  if (est_correlation) pars <- c(pars, "Omega") # add correlation matrix
+  if (estimate_nu) pars <- c(pars, "nu")
+  if (estimate_trend_ar) pars <- c(pars, "phi")
+  if (estimate_trend_ma) pars <- c(pars, "theta")
+  if(!is.null(obs_covar)) pars = c(pars, "b_obs")
+  if(!is.null(pro_covar)) pars = c(pars, "b_pro")
+
+  sampling_args <- list(
+    object = stanmodels$dfa,
+    data = data_list,
+    pars = pars,
+    control = control,
+    chains = chains,
+    iter = iter,
+    thin = thin,
+    ...
+  )
+
+  if (sample) {
+    mod <- do.call(sampling, sampling_args)
+    if (chains > 1) {
+      out <- invert_chains(mod, trends = num_trends, print = FALSE)
+    } else {
+      e <- rstan::extract(mod, permuted = FALSE)
+      ep <- rstan::extract(mod, permuted = TRUE)
+      out <- list(
+        model = mod, samples_permuted = ep, samples = e,
+        monitor = rstan::monitor(e)
+      )
+    }
+
+    out[["data"]] <- Y # keep data included
+    out <- structure(out, class = "bayesdfa")
+  } else {
+    out <- data_list
+  }
+  out
+}
+
+
+
+```
+
+```{r}
+sim_dfa <- function(num_trends = 1,
+                    num_years = 20,
+                    num_ts = 4,
+                    loadings_matrix = matrix(
+                      nrow = num_ts, ncol = num_trends,
+                      rnorm(num_ts * num_trends, 0, 1)
+                    ),
+                    sigma = rlnorm(1, meanlog = log(0.2), 0.1),
+                    varIndx = rep(1, num_ts),
+                    extreme_value = NULL,
+                    extreme_loc = NULL,
+                    nu_fixed = 100,
+                    user_supplied_deviations = NULL) {
+  y_ignore <- matrix(rnorm(num_ts * num_years), nrow = num_ts, ncol = num_years)
+
+  d <- fit_dfa(y_ignore,
+    num_trends = num_trends, sample = FALSE, zscore = FALSE,
+    varIndx = varIndx, nu_fixed = nu_fixed
+  )
+
+  Z <- loadings_matrix
+  y <- vector(mode = "numeric", length = d$N)
+
+  for (k in seq_len(d$K)) {
+    Z[k, k] <- abs(Z[k, k]) # add constraint for Z diagonal
+  }
+  # fill in 0s
+  for (k in seq_len(d$K)) {
+    for (p in seq_len(d$P)) {
+      if (p < k) Z[p, k] <- 0
+    }
+  }
+
+  x <- matrix(nrow = d$K, ncol = d$N) # random walk-trends
+
+
+  # initial state for each trend
+  for (k in seq_len(d$K)) {
+
+    if (!is.null(user_supplied_deviations)) {
+      devs <- user_supplied_deviations[,k]
+    } else {
+      devs <- rt(d$N, df = d$nu_fixed)
+    }
+
+    x[k, 1] <- rnorm(1, 0, 1)
+    if (is.null(extreme_value)) {
+      for (t in seq(2, d$N)) {
+        x[k, t] <- x[k, t - 1] + devs[t] # random walk
+      }
+    } else {
+      if (is.null(extreme_loc)) extreme_loc <- round(num_years / 2)
+      for (t in 2:(extreme_loc - 1)) {
+        x[k, t] <- x[k, t - 1] + devs[t] # random walk
+      }
+      # only include extreme in first trend
+      if (k == 1) {
+        x[1, extreme_loc] <- x[1, extreme_loc - 1] + extreme_value
+      } else {
+        x[k, extreme_loc] <- x[k, extreme_loc - 1] + devs[t]
+      }
+      for (t in seq(extreme_loc + 1, d$N)) {
+        x[k, t] <- x[k, t - 1] + devs[t] # random walk
+      }
+    }
+  }
+
+  pred <- Z %*% x
+  for (i in seq_len(d$n_pos)) {
+    y[i] <- rnorm(
+      1, pred[d$row_indx_pos[i], d$col_indx_pos[i]],
+      sigma[d$varIndx[d$row_indx_pos[i]]]
+    )
+  }
+  y_sim <- matrix(y, nrow = d$P)
+  list(y_sim = y_sim, pred = pred, x = x, Z = Z, sigma = sigma)
+}
+```
+
+
+```{r}
+sim_dat_raw = sim_dfa(num_trends = 3, num_years = 200, num_ts = 11)
+
+sim_dat = t(sim_dat_raw$y_sim) %>% 
+  as_tibble %>% 
+  setNames(c("total_sales", str_c("s", 1:10)))
+
+sim_dat %>% head
+
+
+data_list$sim <- sim_dat
+
+current_data <- data_list$sim
+
+colnames(current_data)
+
+chan_names$sim = str_c("s", 1:10)
+
+factor_data$sim = generate_factor_stan_data(depvar_name, 
+                                              chan_names$sim, num_trends = 3, 
+                                              estimate_nu = T, 
+                                              zscore = T)
+
+channel_data$sim = generate_obs_stan_data(depvar_name, chan_names$sim, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+
+
+channel_data$sim$x1_exo[1:13] = 0
+channel_data$sim$state_bound_type[1:13] = 0
+
+stan_data$sim = c(factor_data$sim, channel_data$sim, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+stan_data$sim$state_lb[1:3] = 0
+stan_data$sim$state_ub[1:3] = 0
+stan_data$sim$depvar %>% ts.plot()
+stan_data$sim %>% 
+  map(~ any(abs(.x - -0.0174605)<0.001)) %>% 
+  purrr::keep(~.x)
+
+stan_data$sim$measurement_exo_ub = abs(stan_data$sim$measurement_exo_ub)
+stan_data$sim$measurement_endo_ub = abs(stan_data$sim$measurement_endo_ub)
+```
+
+```{r}
+fit$sim = vb(
+  stanmodels$dfa_pred,
+  stan_data$sim,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$sim = rstan::extract(fit$sim)
+```
+
+```{r}
+m = post$sim$channel_spend_impact %>% apply(c(2,3), mean)
+s = post$sim$Px_diag %>% apply(c(2,3), mean) %>% sqrt
+```
+
+```{r}
+idx = 5
+ts.plot(cbind(m[,idx]+2*s[,idx], m[,idx], m[idx]-2*s[,idx]),
+        col = c("darkred", "black", "darkred"), lty = c(2,1,2))
+```
+
