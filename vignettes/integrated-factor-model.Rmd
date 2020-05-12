@@ -1056,7 +1056,8 @@ sim_dfa <- function(num_trends = 1,
 
 
 ```{r}
-sim_dat_raw = sim_dfa(num_trends = 3, num_years = 200, num_ts = 11)
+sim_steps = 200
+sim_dat_raw = sim_dfa(num_trends = 3, num_years = sim_steps, num_ts = 11)
 
 sim_dat = t(sim_dat_raw$y_sim) %>% 
   as_tibble %>% 
@@ -1121,7 +1122,64 @@ s = post$sim$Px_diag %>% apply(c(2,3), mean) %>% sqrt
 
 ```{r}
 idx = 5
-ts.plot(cbind(m[,idx]+2*s[,idx], m[,idx], m[idx]-2*s[,idx]),
+ts.plot(cbind(m[,idx]+2*s[,idx], m[,idx], m[, idx]-2*s[,idx]),
         col = c("darkred", "black", "darkred"), lty = c(2,1,2))
+```
+
+
+```{r}
+
+stan_data$simplus = stan_data$sim
+
+set.seed(1)
+effect = cumsum(rnorm(sim_steps, 0, sd = 0.5))
+
+stan_data$simplus$depvar = stan_data$sim$depvar + effect * sim_dat[, 2]
+
+ts.plot(cbind(stan_data$simplus$depvar, stan_data$sim$depvar), 
+        col = c("darkred", "darkblue"), lty = 1)
+legend("topleft", c("with effect", "original"), col = c("darkred", "darkblue", "darkred"), lty = 1)
+
+ts.plot(effect)
+
+```
+
+```{r}
+fit$simplus = vb(
+  stanmodels$dfa_pred,
+  stan_data$simplus,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$simplus = rstan::extract(fit$simplus)
+```
+
+```{r}
+actual_idx = 4
+no_effect_idx = 5
+
+par(mfrow=c(1,2))
+m = post$simplus$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, actual_idx] 
+s = post$simplus$Px_diag %>% apply(c(2,3), mean) %>% sqrt %>% .[, actual_idx]
+
+ts.plot(cbind(m+2*s, m, m-2*s, effect),
+        col = c("darkred", "black", "darkred", "darkgreen"), lty = c(2,1,2, 1),
+        main = "Channel With Effect")
+legend("topleft", c("estimated", "actual"), col = c("black", "darkgreen"), lty = 1)
+
+
+m = post$simplus$channel_spend_impact %>% apply(c(2,3), mean) %>% .[, no_effect_idx] 
+s = post$simplus$Px_diag %>% apply(c(2,3), mean) %>% sqrt %>% .[, no_effect_idx]
+
+ts.plot(cbind(m+2*s, m, m-2*s, effect),
+        col = c("darkred", "black", "darkred", "darkgreen"), lty = c(2,1,2, 1),
+        main = "Channel With No Effect")
+legend("topleft", c("estimated", "actual"), col = c("black", "darkgreen"), lty = 1)
+
+par(mfrow=c(1,1))
 ```
 
