@@ -1,0 +1,419 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+- can't run this in bombas or any recast b/c recast project is pinned to rstan 2.18
+- this model requires stanheaders 2.19.2
+- stanheaders can't be above rstan
+
+```{r setup}
+library(tidyverse)
+library(rstan)
+library(bayesplot)
+library(recast)
+library(loo)
+weekly_clean_data = read_csv("../../weekly_clean_data.csv")
+dfa_pred = stan_model("../src/stan_files/dfa-pred.stan")
+stanmodels <- list()
+stanmodels$dfa_pred = dfa_pred
+```
+
+Because I didn't write my helper functions well below I need to store whatever the current dataset is in a global -- `current_data` -- which we'll overwrite. Not good practice but will suffice for testing. 
+
+```{r}
+data_list <- list()
+data_list$full <- weekly_clean_data
+# between four weeks of relatively calm period
+data_list$t170 <- weekly_clean_data[1:170, ]
+data_list$t174 <- weekly_clean_data[1:174, ]
+# one week before the end of the data
+data_list$t207 <- weekly_clean_data[1:207, ]
+# resetting the global
+current_data <- data_list$full
+```
+
+
+The first thing I need to do is to generate all the parameters for the factor part of the model:
+
+
+```{r generate factor data}
+.generate_factor_stan_data <- function(
+                    y,
+                    depvar,
+                    num_trends = 1,
+                    varIndx = NULL,
+                    zscore = T,
+                    nu_fixed = 101,
+                    est_correlation = FALSE,
+                    estimate_nu = FALSE,
+                    estimate_trend_ar = FALSE,
+                    estimate_trend_ma = FALSE,
+                    sample = TRUE,
+                    data_shape = "long",
+                    obs_covar = NULL,
+                    pro_covar = NULL) {
+  predictors <- y
+  
+  data_shape <- match.arg(data_shape)
+  if (ncol(y) > nrow(y) && data_shape == "long") {
+    warning(
+      "ncol(y) > nrow(y) and data_shape == 'long'; are you sure your",
+      "input data is in long format?"
+    )
+  }
+  if (ncol(y) < nrow(y) && data_shape == "wide") {
+    warning(
+      "ncol(y) < nrow(y) and data_shape == 'wide'; are you sure your",
+      "input data is in wide format?"
+    )
+  }
+  if (data_shape == "long") {
+    y <- t(y)
+  }
+  if (nrow(y) < 3) {
+    stop("fit_dfa() only works with 3 or more time series. We detected ",
+      nrow(y), " time series.")
+  }
+  if(!is.null(obs_covar)) {
+    if(ncol(obs_covar) != 4) {
+      stop("observation covariates must be in a data frame with 4 columns")
+    }
+  }
+  if(!is.null(pro_covar)) {
+    if(ncol(pro_covar) != 4) {
+      stop("process covariates must be in a data frame with 4 columns")
+    }
+  }
+  # parameters for DFA
+  N <- ncol(y) # number of time steps
+  P <- nrow(y) # number of time series
+  K <- num_trends # number of dfa trends
+  nZ <- P * K - sum(seq_len(K)) # number of non-zero parameters that are unconstrained
+  for (i in seq_len(P)) {
+    if (zscore) {
+      if (length(unique(na.omit(c(y[i, ])))) == 1L) {
+        stop("Can't scale one or more of the time series because all values ",
+          "are the same. Remove this/these time series or set `zscore = FALSE`.",
+          call. = FALSE
+        )
+      }
+      y[i, ] <- scale(y[i, ], center = TRUE, scale = TRUE)
+    } else {
+      y[i, ] <- scale(y[i, ], center = TRUE, scale = FALSE)
+    }
+  }
+  Y <- y # included in returned object at end
+  # mat_indx now references the unconstrained values of the Z matrix.
+  mat_indx <- matrix(0, P, K)
+  start <- 1
+  for (k in seq_len(K)) {
+    for (p in seq(k + 1, P)) {
+      mat_indx[p, k] <- start
+      start <- start + 1
+    }
+  }
+  # row_indx and col_indx now references the unconstrained values of the Z matrix.
+  row_indx <- matrix((rep(seq_len(P), K)), P, K)[mat_indx > 0]
+  col_indx <- matrix(sort(rep(seq_len(K), P)), P, K)[mat_indx > 0]
+  diag(mat_indx) <- 1
+  row_indx_z <- matrix((rep(seq_len(P), K)), P, K)[mat_indx == 0]
+  col_indx_z <- matrix(sort(rep(seq_len(K), P)), P, K)[mat_indx == 0]
+  row_indx_z <- c(row_indx_z, 0, 0) # +2 zeros for making stan ok with data types
+  col_indx_z <- c(col_indx_z, 0, 0) # +2 zeros for making stan ok with data types
+  nZero <- length(row_indx_z)
+  # set the model up to have shared variances
+  if (is.null(varIndx)) {
+    varIndx <- rep(1, P)
+  }
+  nVariances <- length(unique(varIndx))
+  # indices of positive values - Stan can't handle NAs
+  row_indx_pos <- matrix(rep(seq_len(P), N), P, N)[!is.na(y)]
+  col_indx_pos <- matrix(sort(rep(seq_len(N), P)), P, N)[!is.na(y)]
+  n_pos <- length(row_indx_pos)
+  row_indx_na <- matrix(rep(seq_len(P), N), P, N)[is.na(y)]
+  col_indx_na <- matrix(sort(rep(seq_len(N), P)), P, N)[is.na(y)]
+  n_na <- length(row_indx_na)
+  y <- y[!is.na(y)]
+  # flag for whether to use a normal dist
+  use_normal <- if (nu_fixed > 100) 1 else 0
+  if (estimate_nu) use_normal <- 0 # competing flags
+  # covariates
+  if(!is.null(obs_covar)) {
+    obs_covar_index = as.matrix(obs_covar[,c("time","timeseries","covariate")])
+    num_obs_covar = nrow(obs_covar_index)
+    n_obs_covar = length(unique(obs_covar_index[,"covariate"]))
+    obs_covar_value = obs_covar[,"value"]
+  } else {
+    num_obs_covar = 0
+    n_obs_covar = 0
+    obs_covar_value = c(0)[0]
+    obs_covar_index = matrix(0,1,3)[c(0)[0],]
+  }
+  if(!is.null(pro_covar)) {
+    pro_covar_index = as.matrix(pro_covar[,c("time","trend","covariate")])
+    num_pro_covar = nrow(pro_covar_index)
+    n_pro_covar = length(unique(pro_covar_index[,"covariate"]))
+    pro_covar_value = pro_covar[,"value"]
+  } else {
+    num_pro_covar = 0
+    n_pro_covar = 0
+    pro_covar_value = c(0)[0]
+    pro_covar_index = matrix(0,1,3)[c(0)[0],]
+  }
+  data_list <- list(
+    N = N,
+    P = P,
+    K = K,
+    nZ = nZ,
+    y = y,
+    row_indx = row_indx,
+    col_indx = col_indx,
+    nZero = nZero,
+    varIndx = varIndx,
+    nVariances = nVariances,
+    row_indx_z = row_indx_z,
+    col_indx_z = col_indx_z,
+    nZero = nZero,
+    row_indx_z = row_indx_z,
+    col_indx_z = col_indx_z,
+    row_indx_pos = row_indx_pos,
+    col_indx_pos = col_indx_pos,
+    n_pos = n_pos,
+    row_indx_na = row_indx_na,
+    col_indx_na = col_indx_na,
+    n_na = n_na,
+    nu_fixed = nu_fixed,
+    estimate_nu = as.integer(estimate_nu),
+    use_normal = use_normal,
+    est_cor = as.numeric(est_correlation),
+    est_phi = as.numeric(estimate_trend_ar),
+    est_theta = as.numeric(estimate_trend_ma),
+    num_obs_covar = num_obs_covar,
+    n_obs_covar = n_obs_covar,
+    obs_covar_value = obs_covar_value,
+    obs_covar_index = obs_covar_index,
+    num_pro_covar = num_pro_covar,
+    n_pro_covar = n_pro_covar,
+    pro_covar_value = pro_covar_value,
+    pro_covar_index = pro_covar_index,
+    depvar = depvar,
+    predictors = predictors
+  )
+  return(data_list)
+}
+generate_factor_stan_data <- function(depvar_name, chan_names, ...) {
+  
+  depvar = select(current_data, !!depvar_name)
+  y      = as.data.frame(current_data[, chan_names])
+  
+  
+  .generate_factor_stan_data(y, depvar, ...)
+}
+```
+
+The second thing I need to do is to generate all the parameters for the custom filter part of the model: 
+
+```{r generate channel parameters}
+generate_obs_stan_data <- function(depvar_name, chan_names, num_trends, config_dir, upscale_trends = F) {
+  y_actual = current_data[, depvar_name][[1]]
+  
+  if(file.exists(file.path(tempdir(), "test_sim.yaml"))) {
+    file.remove(file.path(tempdir(), "test_sim.yaml"))
+  }
+  
+  recast::create_default_chan_config(
+    subset_name = "test",
+    depvar_name = "sim",
+    chan_names = chan_names, 
+    config_dir = config_dir
+  )
+  orig_config = yaml::read_yaml(file.path(config_dir, "test_sim.yaml"))
+  trend_template = orig_config[1]
+  trend_template[[1]]$mu = 0.0001
+  trend_template[[1]]$adstock = 0
+  
+  if(upscale_trends) {
+    trend_template[[1]]$ub = Inf
+    trend_template[[1]]$lb = -Inf
+    trend_template[[1]]$q80 = sd(y_actual)/10
+    trend_template[[1]]$q20 = -sd(y_actual)/10  
+  }
+  
+  new_config = orig_config
+  for(i in num_trends:1) {
+    trend_component = trend_template
+    names(trend_component)[1] = str_c("t", i)
+    new_config = c(trend_component, new_config)
+  }
+  chan_params_factor = recast::longify_chan_config(new_config)
+  
+  other_data = list(
+    sigma_level_ub = mean(y_actual) / 500,
+    sigma_slope_ub = mean(y_actual) / 500,
+    sigma_seasons_ub = mean(y_actual) / 100,
+    sigma_adstock_ub = 100,
+    measurement_endo_ub = mean(y_actual) / 50,
+    measurement_exo_ub = mean(y_actual) / 50
+  )
+  
+  all_data = c(chan_params_factor, other_data)
+  
+  return(all_data)
+}
+```
+
+Now I need to put it all together:
+
+```{r}
+chan_names <- list()
+factor_data <- list()
+chan_names$small = colnames(current_data)[7:16]
+depvar_name = "total_sales"
+config_dir = tempdir()
+factor_data$small = generate_factor_stan_data(depvar_name, chan_names$small, 
+                                              num_trends = 3, estimate_nu = T, 
+                                              zscore = T)
+```
+
+We're going to generate two stan datas, one with trends upscaled in our data/config and one in stan
+
+First the way we have been doing it
+
+```{r}
+channel_data <- list()
+stan_data <- list()
+channel_data$scaled_in_config = generate_obs_stan_data(depvar_name, chan_names, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+stan_data$scaled_in_config = c(factor_data$small, channel_data$scaled_in_config, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+```
+
+And second doing it in stan
+
+```{r}
+channel_data$scaled_in_stan = generate_obs_stan_data(depvar_name, chan_names, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = F)
+stan_data$scaled_in_stan = c(factor_data$small, channel_data$scaled_in_stan, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 1)
+```
+
+
+And finally, to start sampling -- first the existing way:
+
+```{r}
+fit <- list()
+post <- list()
+# fit$scaled_in_config = vb(
+#   stanmodels$dfa_pred,
+#   stan_data$scaled_in_config,
+#   # iter = 100,
+#   # chains = 2,
+#   # cores = 2,
+#   # control = list(adapt_delta = .99, max_treedepth = 10),
+#   pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+# )
+# 
+# post$scaled_in_config = rstan::extract(fit$scaled_in_config)
+```
+
+And with residualization:
+
+```{r}
+# fit$scaled_in_stan = vb(
+#   stanmodels$dfa_pred,
+#   stan_data$scaled_in_stan,
+#   # iter = 100,
+#   # chains = 2,
+#   # cores = 2,
+#   # control = list(adapt_delta = .99, max_treedepth = 10),
+#   pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+# )
+# 
+# post$scaled_in_stan = rstan::extract(fit$scaled_in_stan)
+```
+
+
+```{r}
+log_lik <- list()
+r_eff   <- list()
+leeloo  <- list()
+# log_lik$scaled_in_config <- extract_log_lik(fit$scaled_in_config, merge_chains = FALSE)
+# r_eff$scaled_in_config <- relative_eff(exp(log_lik$scaled_in_config ))
+# leeloo$scaled_in_config <- loo(log_lik$scaled_in_config, r_eff = r_eff$scaled_in_config, cores = 2)
+# 
+# log_lik$scaled_in_stan <- extract_log_lik(fit$scaled_in_stan, merge_chains = FALSE)
+# r_eff$scaled_in_stan <- relative_eff(exp(log_lik$scaled_in_stan))
+# leeloo$scaled_in_stan <- loo(log_lik$scaled_in_stan, r_eff = r_eff$scaled_in_stan, cores = 2)
+```
+
+
+### testing consistency of the rates
+
+```{r}
+chan_names$consistency = colnames(current_data)[3:24]
+factor_data$consistency = generate_factor_stan_data(depvar_name, 
+                                              chan_names$consistency, 
+                                              num_trends = 3, estimate_nu = T, 
+                                              zscore = T)
+channel_data$consistency = generate_obs_stan_data(depvar_name, 
+                                                  chan_names$consistency, 
+                                                  num_trends = 3, 
+                                                  config_dir, 
+                                                  upscale_trends = T)
+stan_data$consistency = c(factor_data$consistency, channel_data$consistency, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+```
+
+
+```{r}
+fit$consistency$one = vb(
+  stanmodels$dfa_pred,
+  stan_data$consistency,
+  seed = 1,
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$consistency$one = rstan::extract(fit$consistency$one)
+
+```
+
+
+```{r}
+current_data <- data_list$t207
+chan_names$stopping = colnames(current_data)[3:24]
+factor_data$stopping$t207 = generate_factor_stan_data(depvar_name, 
+                                              chan_names$stopping, num_trends = 3, 
+                                              estimate_nu = T, 
+                                              zscore = T)
+channel_data$stopping$t207 = generate_obs_stan_data(depvar_name, chan_names$stopping, 
+                                                       num_trends = 3, config_dir, 
+                                                       upscale_trends = T)
+stan_data$stopping$t207 = c(factor_data$stopping$t207, channel_data$stopping$t207, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+```
+
+```{r}
+fit$stopping$t207 = vb(
+  stanmodels$dfa_pred,
+  stan_data$stopping$t207,
+  seed = 1,
+  # iter = 100,
+  # chains = 2,
+  # cores = 2,
+  # control = list(adapt_delta = .99, max_treedepth = 10),
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+post$stopping$t207 = rstan::extract(fit$stopping$t207)
+```
+
+
+```{r}
+cbind(post$consistency$one$rates %>% colMeans(),
+      post$stopping$t207$rates %>% colMeans()) %>% 
+  ts.plot()
+```
+
+

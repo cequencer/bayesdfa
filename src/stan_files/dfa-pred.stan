@@ -1,5 +1,57 @@
 functions {
 
+  vector[] tmvtnorm(vector mu, matrix L, vector lb, vector ub, vector s, vector u) {
+    int K = rows(mu); vector[K] d; vector[K] z; vector[K] out[2];
+    for (k in 1:K) {
+      int km1 = k - 1;
+
+      // s = -1 -> upper bound
+      // s = 1 -> lower bound
+      // s = 2 -> both
+
+      if (s[k] != 0) {
+        real v;
+        if (s[k] == -1) {
+          real z_star = (ub[k] -
+                      (mu[k] + ((k > 1) ? L[k,1:km1] * head(z, km1) : 0))) /
+                      L[k,k];
+          real u_star = Phi(z_star);
+
+          v = u_star * u[k];
+          d[k] = u_star;
+        } else if (s[k] == 1) {
+          real z_star = (lb[k] -
+                      (mu[k] + ((k > 1) ? L[k,1:km1] * head(z, km1) : 0))) /
+                      L[k,k];
+           real u_star = Phi(z_star);
+          d[k] = 1 - u_star;
+          v = u_star + d[k] * u[k];
+        } else { // upper bound and lower bound
+          real z_star = (lb[k] -
+                      (mu[k] + ((k > 1) ? L[k,1:km1] * head(z, km1) : 0))) /
+                      L[k,k];
+          real u_star = Phi(z_star);
+          real z_star2 = (ub[k] - // upper bound
+                      (mu[k] + ((k > 1) ? L[k,1:km1] * head(z, km1) : 0))) /
+                      L[k,k];
+          real u_star2 = Phi(z_star2);
+
+          v = u_star + (u_star2 - u_star) * u[k];
+          d[k] = u_star2 - u_star;
+
+        }
+        z[k] = inv_Phi(v);
+      }
+      else {
+        z[k] = inv_Phi(u[k]);
+        d[k] = 1;
+      }
+    }
+    out[1] = z;
+    out[2] = d;
+    return out;
+  }
+
   vector constrain_a(vector a_unconstrained, vector bound_type, vector lb, vector ub) {
 
   /*
@@ -515,10 +567,11 @@ parameters {
   real<lower=-1,upper=1> theta[est_theta*K];
   cholesky_factor_corr[n_pcor] Lcorr;
   // our part
-  vector<lower=0, upper=1>[n_adstocked_channels] rates_raw;
+  vector<lower=0, upper=1>[n_adstocked_channels] rates_u;
   real<lower=0, upper=measurement_exo_ub> measurement_exo;
   vector<lower=0, upper=1>[P+K] sigma_channels;
   vector<lower=0, upper=sigma_adstock_ub>[n_adstocked_channels]    sigma_adstock;
+  cholesky_factor_corr[n_adstocked_channels] L_corr_rates;
 }
 transformed parameters {
   matrix[P,N] pred; //vector[P] pred[N];
@@ -532,6 +585,8 @@ transformed parameters {
   vector[K] indicator; // indicates whether diagonal is neg or pos
   vector[K] psi_root; // derived sqrt(expansion parameter psi)
   matrix[n_rows_return_exo,  n_cols_return_exo]  ssm_results_exo;
+  vector<lower=0, upper=1>[n_adstocked_channels] rates_unspread;
+  cholesky_factor_cov[n_adstocked_channels] L_cov_rates = diag_matrix(rep_vector(0.1, n_adstocked_channels)) * L_corr_rates;
   vector[P+K] rates;
   matrix[1, 1] H_exo = rep_matrix(1, 1, 1);
   matrix[P+K, P+K] Q_exo  = rep_matrix(1, P+K, P+K);
@@ -545,18 +600,18 @@ transformed parameters {
 
 
   // phi is the ar(1) parameter, fixed or estimated
-  if(est_phi == 1) {
-    for(k in 1:K) {phi_vec[k] = phi[k];}
-  } else {
-    for(k in 1:K) {phi_vec[k] = 1;}
-  }
+  // if(est_phi == 1) {
+  //   for(k in 1:K) {phi_vec[k] = phi[k];}
+  // } else {
+  //   for(k in 1:K) {phi_vec[k] = 1;}
+  // }
 
   // theta is the ma(1) parameter, fixed or estimated
-  if(est_theta == 1) {
-    for(k in 1:K) {theta_vec[k] = theta[k];}
-  } else {
-    for(k in 1:K) {theta_vec[k] = 0;}
-  }
+  // if(est_theta == 1) {
+  //   for(k in 1:K) {theta_vec[k] = theta[k];}
+  // } else {
+  //   for(k in 1:K) {theta_vec[k] = 0;}
+  // }
 
   for(p in 1:P) {
     sigma_vec[p] = sigma[varIndx[p]]; // convert estimated sigmas to vec form
@@ -601,30 +656,30 @@ transformed parameters {
   }
 
   // initial state for each trend
-  for(k in 1:K) {
-    x[k,1] = x0[k];
-    // trend is modeled as random walk, with optional
-    // AR(1) component = phi, and optional MA(1) component
-    // theta. Theta is included in the model block below.
-    for(t in 2:N) {
-      x[k,t] = phi_vec[k]*x[k,t-1] + devs[k,t-1];
-    }
-  }
-  // this block also for the expansion prior, used to convert trends
-  for(k in 1:K) {
-    //  x[k,1:N] = x[k,1:N] * indicator[k] * psi_root[k];
-    for(t in 1:N) {
-      x[k,t] = x[k,t] * indicator[k] * psi_root[k];
-    }
-  }
+  // for(k in 1:K) {
+  //   x[k,1] = x0[k];
+  //   // trend is modeled as random walk, with optional
+  //   // AR(1) component = phi, and optional MA(1) component
+  //   // theta. Theta is included in the model block below.
+  //   for(t in 2:N) {
+  //     x[k,t] = phi_vec[k]*x[k,t-1] + devs[k,t-1];
+  //   }
+  // }
+  // // this block also for the expansion prior, used to convert trends
+  // for(k in 1:K) {
+  //   //  x[k,1:N] = x[k,1:N] * indicator[k] * psi_root[k];
+  //   for(t in 1:N) {
+  //     x[k,t] = x[k,t] * indicator[k] * psi_root[k];
+  //   }
+  // }
 
   // adjust predictions if process covariates exist
-  if(num_pro_covar > 0) {
-    for(i in 1:num_pro_covar) {
-      // indexed by time, trend, covariate #, covariate value
-      x[pro_covar_index[i,2],pro_covar_index[i,1]] = x[pro_covar_index[i,2],pro_covar_index[i,1]] + b_pro[pro_covar_index[i,3], pro_covar_index[i,2]] * pro_covar_value[i];
-    }
-  }
+  // if(num_pro_covar > 0) {
+  //   for(i in 1:num_pro_covar) {
+  //     // indexed by time, trend, covariate #, covariate value
+  //     x[pro_covar_index[i,2],pro_covar_index[i,1]] = x[pro_covar_index[i,2],pro_covar_index[i,1]] + b_pro[pro_covar_index[i,3], pro_covar_index[i,2]] * pro_covar_value[i];
+  //   }
+  // }
 
   // N is sample size, P = time series, K = number trends
   // [PxN] = [PxK] * [KxN]
@@ -642,10 +697,16 @@ transformed parameters {
   Q_exo  = diag_matrix(sigma_channels .* sigma_channels_ub);
 
   { // spreading the raw rates to the rates vector
+
+    vector[n_adstocked_channels] mu_rates = rate_lb + (rate_ub - rate_lb) / 2;
+    vector[n_adstocked_channels] s = rep_vector(3, n_adstocked_channels);
     int counter = 1;
+
+    rates_unspread = mu_rates + L_cov_rates * tmvtnorm(mu_rates, L_cov_rates, rate_ub, rate_lb, s, rates_u)[1];
+
     for(i in 1:(P+K)) {
       if(rate_index[i] == 1) {
-        rates[i]   = rates_raw[counter] * (rate_ub[i] - rate_lb[i]) + rate_lb[i];
+        rates[i]   = rates_unspread[i];
         R_exo[i,i] = sigma_adstock[counter];
         counter += 1;
       } else {
@@ -768,7 +829,8 @@ model {
   sigma_channels ~ uniform(0, 1);
   sigma_adstock  ~ uniform(0, sigma_adstock_ub);
 
-  for(i in 1:n_adstocked_channels) rates_raw[i] ~ normal(.5, .2)T[0, 1];
+  // for(i in 1:n_adstocked_channels) rates_raw[i] ~ normal(.5, .2)T[0, 1];
+  L_corr_rates ~ lkj_corr_cholesky(1);
 
   measurement_exo  ~ uniform(0, measurement_exo_ub);
 
