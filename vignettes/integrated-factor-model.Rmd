@@ -390,6 +390,117 @@ leeloo  <- list()
 
 ```
 
+
+### testing consistency of the rates
+
+```{r}
+chan_names$consistency = colnames(current_data)[3:24]
+
+factor_data$consistency = generate_factor_stan_data(depvar_name, 
+                                              chan_names$consistency, 
+                                              num_trends = 3, estimate_nu = T, 
+                                              zscore = T)
+
+
+channel_data$consistency = generate_obs_stan_data(depvar_name, 
+                                                  chan_names$consistency, 
+                                                  num_trends = 3, 
+                                                  config_dir, 
+                                                  upscale_trends = T)
+
+stan_data$consistency = c(factor_data$consistency, channel_data$consistency, 
+                               n_holdout = 0, residualize = 0, upscale_trends = 0)
+
+```
+
+
+```{r}
+fit$consistency$one = vb(
+  stanmodels$dfa_pred,
+  stan_data$consistency,
+  seed = 1,
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+fit$consistency$two = vb(
+  stanmodels$dfa_pred,
+  stan_data$consistency,
+  seed = 1,
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$consistency$one = rstan::extract(fit$consistency$one)
+post$consistency$two = rstan::extract(fit$consistency$two)
+
+fit$consistency$three = vb(
+  stanmodels$dfa_pred,
+  stan_data$consistency,
+  importance_resampling = T,
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+fit$consistency$four = vb(
+  stanmodels$dfa_pred,
+  stan_data$consistency,
+  importance_resampling = T,
+  pars = c("channel_spend_impact", "log_lik", "x", "y_pred", "Z", "rates", "Px_diag")
+)
+
+post$consistency$three = rstan::extract(fit$consistency$three)
+post$consistency$four = rstan::extract(fit$consistency$four)
+```
+
+
+
+
+### testing to see if the rates are the same
+
+```{r}
+cbind(
+  post$consistency$one$rates %>% colMeans,
+  post$consistency$two$rates %>% colMeans
+) 
+
+```
+
+Col 6 is off
+
+```{r}
+post$consistency$one$rates[, 6] %>% hist(col = "lightgrey")
+post$consistency$two$rates[, 6] %>% hist(col = scales::alpha("darkred", 0.5), add = T)
+```
+
+Is there any relationship to spend levels and whether or not the rates are consistent?
+
+```{r}
+rate_inconsistencies = cbind.data.frame(
+  first = post$consistency$one$rates %>% colMeans,
+  second = post$consistency$two$rates %>% colMeans
+) %>% 
+  mutate(delta = abs(first-second)) %>% 
+  mutate(idx = row_number()-num_factors) %>% 
+  filter(idx > 0)
+
+spend_amounts = cbind.data.frame(
+  spend_amount = stan_data$consistency$predictors %>% apply(2, mean)
+) %>% 
+  mutate(idx = 1:n())
+
+tgthr = left_join(
+  rate_inconsistencies, 
+  spend_amounts, by = "idx"
+) 
+
+tgthr %>% head
+
+summary(lm(scale(delta) ~ scale(spend_amount), tgthr))
+plot(scale(delta) ~ scale(spend_amount), tgthr)
+
+```
+
+
+
+
 ```{r}
 
 plot_comp_between_channels = 
@@ -401,6 +512,31 @@ plot_comp_between_channels =
     legend("topright", names(post_list), col = c("darkred", "darkblue"), lty = 1)
   }
 ```
+
+
+```{r}
+plot_comp_between_channels(15, post$consistency, 3)
+```
+
+
+Well that sucks ... checking loo
+
+```{r}
+log_lik$consistency$one <- extract_log_lik(fit$consistency$one, merge_chains = FALSE)
+r_eff$consistency$one   <- relative_eff(exp(log_lik$consistency$one))
+leeloo$consistency$one  <- loo(log_lik$consistency$one, r_eff = r_eff$consistency$one, cores = 2)
+
+log_lik$consistency$two <- extract_log_lik(fit$consistency$two, merge_chains = FALSE)
+r_eff$consistency$two   <- relative_eff(exp(log_lik$consistency$two))
+leeloo$consistency$two  <- loo(log_lik$consistency$two, r_eff = r_eff$consistency$two, cores = 2)
+
+loo_compare(leeloo$consistency)
+loo::loo_model_weights(leeloo$consistency)
+leeloo$consistency$two
+```
+
+
+
 
 
 ```{r}
@@ -515,6 +651,7 @@ stan_data$stopping$t207 = c(factor_data$stopping$t207, channel_data$stopping$t20
 fit$stopping$t207 = vb(
   stanmodels$dfa_pred,
   stan_data$stopping$t207,
+  seed = 1,
   # iter = 100,
   # chains = 2,
   # cores = 2,
@@ -1182,4 +1319,38 @@ legend("topleft", c("estimated", "actual"), col = c("black", "darkgreen"), lty =
 
 par(mfrow=c(1,1))
 ```
+
+## things that need to get done
+
+### easy
+
+0. need to update rstan > 19.2 and stanheaders > 19.2
+1. need to write the functions that compile the data to account for the new data the stan model requires
+2. need to overwrite the stan model 
+3. need to change the `sampling` call to a `vb` call
+
+
+### hard
+
+1. need to change the model s.t. it can accept a holdout period
+
+$$ spend = Z * factors$$
+if you want to infer what the factors must have been if you observe spend
+
+$$ factors = Z^{-1} * spend$$
+
+2. either
+  - need to contrain the rates s.t. they are consistent from run to run
+  - need to write an update model
+  
+  
+### to do
+
+- 
+  
+  
+  
+
+
+
 
